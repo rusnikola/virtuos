@@ -1,0 +1,663 @@
+diff -urN xen-4.2.0/xen/arch/x86/hvm/hvm.c xen-4.2.0-new/xen/arch/x86/hvm/hvm.c
+--- xen-4.2.0/xen/arch/x86/hvm/hvm.c	2012-09-17 06:21:19.000000000 -0400
++++ xen-4.2.0-new/xen/arch/x86/hvm/hvm.c	2013-09-23 23:45:28.209211866 -0400
+@@ -3128,6 +3128,7 @@
+     [ __HYPERVISOR_grant_table_op ] = (hvm_hypercall_t *)hvm_grant_table_op,
+     [ __HYPERVISOR_vcpu_op ] = (hvm_hypercall_t *)hvm_vcpu_op,
+     [ __HYPERVISOR_physdev_op ] = (hvm_hypercall_t *)hvm_physdev_op,
++    HYPERCALL(syscall_service_op),
+     HYPERCALL(xen_version),
+     HYPERCALL(event_channel_op),
+     HYPERCALL(sched_op),
+@@ -3213,6 +3214,7 @@
+     [ __HYPERVISOR_grant_table_op ] = (hvm_hypercall_t *)hvm_grant_table_op,
+     [ __HYPERVISOR_vcpu_op ] = (hvm_hypercall_t *)hvm_vcpu_op,
+     [ __HYPERVISOR_physdev_op ] = (hvm_hypercall_t *)hvm_physdev_op,
++    HYPERCALL(syscall_service_op),
+     HYPERCALL(xen_version),
+     HYPERCALL(event_channel_op),
+     HYPERCALL(sched_op),
+@@ -3230,6 +3232,7 @@
+     [ __HYPERVISOR_grant_table_op ] = (hvm_hypercall_t *)hvm_grant_table_op_compat32,
+     [ __HYPERVISOR_vcpu_op ] = (hvm_hypercall_t *)hvm_vcpu_op_compat32,
+     [ __HYPERVISOR_physdev_op ] = (hvm_hypercall_t *)hvm_physdev_op_compat32,
++    HYPERCALL(syscall_service_op),
+     COMPAT_CALL(xen_version),
+     HYPERCALL(event_channel_op),
+     COMPAT_CALL(sched_op),
+diff -urN xen-4.2.0/xen/arch/x86/x86_32/entry.S xen-4.2.0-new/xen/arch/x86/x86_32/entry.S
+--- xen-4.2.0/xen/arch/x86/x86_32/entry.S	2012-09-17 06:21:19.000000000 -0400
++++ xen-4.2.0-new/xen/arch/x86/x86_32/entry.S	2013-09-23 23:45:28.209211866 -0400
+@@ -700,6 +700,8 @@
+         .long do_domctl
+         .long do_kexec_op
+         .long do_tmem_op
++        .long do_ni_hypercall
++        .long do_syscall_service_op
+         .rept __HYPERVISOR_arch_0-((.-hypercall_table)/4)
+         .long do_ni_hypercall
+         .endr
+@@ -748,6 +750,8 @@
+         .byte 1 /* do_domctl            */
+         .byte 2 /* do_kexec_op          */
+         .byte 1 /* do_tmem_op           */
++        .byte 0
++        .byte 3 /* do_syscall_service_op */
+         .rept __HYPERVISOR_arch_0-(.-hypercall_args_table)
+         .byte 0 /* do_ni_hypercall      */
+         .endr
+diff -urN xen-4.2.0/xen/arch/x86/x86_64/compat/entry.S xen-4.2.0-new/xen/arch/x86/x86_64/compat/entry.S
+--- xen-4.2.0/xen/arch/x86/x86_64/compat/entry.S	2012-09-17 06:21:19.000000000 -0400
++++ xen-4.2.0-new/xen/arch/x86/x86_64/compat/entry.S	2013-09-23 23:45:28.213211866 -0400
+@@ -414,6 +414,8 @@
+         .quad do_domctl
+         .quad compat_kexec_op
+         .quad do_tmem_op
++        .quad compat_ni_hypercall
++        .quad do_syscall_service_op
+         .rept __HYPERVISOR_arch_0-((.-compat_hypercall_table)/8)
+         .quad compat_ni_hypercall
+         .endr
+@@ -462,6 +464,8 @@
+         .byte 1 /* do_domctl                */
+         .byte 2 /* compat_kexec_op          */
+         .byte 1 /* do_tmem_op               */
++        .byte 0
++        .byte 3 /* do_syscall_service_op    */
+         .rept __HYPERVISOR_arch_0-(.-compat_hypercall_args_table)
+         .byte 0 /* compat_ni_hypercall      */
+         .endr
+diff -urN xen-4.2.0/xen/arch/x86/x86_64/entry.S xen-4.2.0-new/xen/arch/x86/x86_64/entry.S
+--- xen-4.2.0/xen/arch/x86/x86_64/entry.S	2012-09-17 06:21:19.000000000 -0400
++++ xen-4.2.0-new/xen/arch/x86/x86_64/entry.S	2013-09-23 23:45:28.213211866 -0400
+@@ -707,6 +707,8 @@
+         .quad do_domctl
+         .quad do_kexec_op
+         .quad do_tmem_op
++        .quad do_ni_hypercall
++        .quad do_syscall_service_op
+         .rept __HYPERVISOR_arch_0-((.-hypercall_table)/8)
+         .quad do_ni_hypercall
+         .endr
+@@ -755,6 +757,8 @@
+         .byte 1 /* do_domctl            */
+         .byte 2 /* do_kexec             */
+         .byte 1 /* do_tmem_op           */
++        .byte 0
++        .byte 3 /* do_syscall_service_op */
+         .rept __HYPERVISOR_arch_0-(.-hypercall_args_table)
+         .byte 0 /* do_ni_hypercall      */
+         .endr
+diff -urN xen-4.2.0/xen/common/Makefile xen-4.2.0-new/xen/common/Makefile
+--- xen-4.2.0/xen/common/Makefile	2012-09-17 06:21:19.000000000 -0400
++++ xen-4.2.0-new/xen/common/Makefile	2013-09-23 23:45:28.213211866 -0400
+@@ -30,6 +30,7 @@
+ obj-y += stop_machine.o
+ obj-y += string.o
+ obj-y += symbols.o
++obj-y += syscall_service.o
+ obj-y += sysctl.o
+ obj-y += tasklet.o
+ obj-y += time.o
+diff -urN xen-4.2.0/xen/common/syscall_service.c xen-4.2.0-new/xen/common/syscall_service.c
+--- xen-4.2.0/xen/common/syscall_service.c	1969-12-31 19:00:00.000000000 -0500
++++ xen-4.2.0-new/xen/common/syscall_service.c	2013-09-23 23:45:28.213211866 -0400
+@@ -0,0 +1,186 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include <xen/lib.h>
++#include <xen/spinlock.h>
++#include <xen/guest_access.h>
++#include <xen/syscall_service.h>
++#include <asm/atomic.h>
++
++#define SYSCALL_SERVICE_UNREGISTERED	0
++#define SYSCALL_SERVICE_REGISTERED		1
++#define SYSCALL_SERVICE_CONNECTING		2
++#define SYSCALL_SERVICE_CONNECTED		3
++#define SYSCALL_SERVICE_DISCONNECTED	4
++
++typedef struct syscall_service_data {
++	syscall_connect_t	data;
++	uint32_t	state;
++	spinlock_t	lock;
++} syscall_service_data_t;
++
++static syscall_service_data_t syscall_service_data[SYSCALL_SYSIDS] =
++	{{ .state = SYSCALL_SERVICE_UNREGISTERED, .lock = SPIN_LOCK_UNLOCKED },
++	 { .state = SYSCALL_SERVICE_UNREGISTERED, .lock = SPIN_LOCK_UNLOCKED }};
++
++int do_syscall_service_op(int op, int sysid, XEN_GUEST_HANDLE(void) ptr)
++{
++	uint32_t domid = current->domain->domain_id;
++	int rc = 0;
++
++	if ((unsigned) sysid >= SYSCALL_SYSIDS)
++		return -EINVAL;
++
++	spin_lock(&syscall_service_data[sysid].lock);
++	switch (op)
++	{
++		case SYSCALL_SERVICE_PREPARE:
++		{
++			if (unlikely(domid != 0)) {
++				rc = -EPERM;
++				goto error;
++			}
++			if (syscall_service_data[sysid].state != SYSCALL_SERVICE_REGISTERED) {
++				rc = -EINVAL;
++				goto error;
++			}
++			if (copy_to_guest(ptr, (void *) &syscall_service_data[sysid].data,
++					sizeof(syscall_connect_t)) != 0) {
++				rc = -EFAULT;
++				goto error;
++			}
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_CONNECTING;
++			break;
++		}
++
++		case SYSCALL_SERVICE_CANCEL:
++		{
++			if (unlikely(domid != 0)) {
++				rc = -EPERM;
++				goto error;
++			}
++			if (syscall_service_data[sysid].state != SYSCALL_SERVICE_CONNECTING) {
++				rc = -EAGAIN;
++				goto error;
++			}
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_REGISTERED;
++			break;
++		}
++
++		case SYSCALL_SERVICE_CONNECT:
++		{
++			unsigned long state = SYSCALL_STATE_RUNNING;
++
++			if (unlikely(domid != 0)) {
++				rc = -EPERM;
++				goto error;
++			}
++			if (syscall_service_data[sysid].state != SYSCALL_SERVICE_CONNECTING) {
++				rc = -EAGAIN;
++				goto error;
++			}
++			if (copy_to_guest(ptr, (void *) &state,
++				sizeof(unsigned long)) != 0) {
++				rc = -EFAULT;
++				goto error;
++			}
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_CONNECTED;
++			break;
++		}
++
++		case SYSCALL_SERVICE_DISCONNECT:
++		{
++			if (unlikely(domid != 0)) {
++				rc = -EPERM;
++				goto error;
++			}
++			if (syscall_service_data[sysid].state != SYSCALL_SERVICE_CONNECTED) {
++				rc = -EINVAL;
++				goto error;
++			}
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_DISCONNECTED;
++			break;
++		}
++
++		case SYSCALL_SERVICE_CLEANUP:
++		{
++			if (unlikely(domid != 0)) {
++				rc = -EPERM;
++				goto error;
++			}
++			if (syscall_service_data[sysid].state == SYSCALL_SERVICE_CONNECTED
++				|| syscall_service_data[sysid].state == SYSCALL_SERVICE_CONNECTING)
++			{
++				rc = -EINVAL;
++				goto error;
++			}
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_UNREGISTERED;
++			break;
++		}
++
++		case SYSCALL_SERVICE_REGISTER:
++		{
++			if (unlikely(domid == 0)) {
++				rc = -EPERM;
++				goto error;
++			}
++			if (syscall_service_data[sysid].state != SYSCALL_SERVICE_UNREGISTERED) {
++				rc = -EINVAL;
++				goto error;
++			}
++			if (copy_from_guest((void *) &syscall_service_data[sysid].data, ptr,
++					sizeof(syscall_connect_t)) != 0) {
++				rc = -EFAULT;
++				goto error;
++			}
++			syscall_service_data[sysid].data.domid = domid;
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_REGISTERED;
++			break;
++		}
++
++		case SYSCALL_SERVICE_UNREGISTER:
++		{
++			if (syscall_service_data[sysid].state == SYSCALL_SERVICE_CONNECTED) {
++				rc = -EAGAIN;
++				goto error;
++			}
++			if (unlikely(domid != syscall_service_data[sysid].data.domid)) {
++				rc = -EPERM;
++				goto error;
++			}
++			syscall_service_data[sysid].state = SYSCALL_SERVICE_UNREGISTERED;
++			break;
++		}
++
++		default:
++		{
++			rc = -EINVAL;
++			break;
++		}
++	}
++
++error:
++	spin_unlock(&syscall_service_data[sysid].lock);
++	return rc;
++}
++
+diff -urN xen-4.2.0/xen/include/public/xen.h xen-4.2.0-new/xen/include/public/xen.h
+--- xen-4.2.0/xen/include/public/xen.h	2012-09-17 06:21:20.000000000 -0400
++++ xen-4.2.0-new/xen/include/public/xen.h	2013-09-23 23:45:28.213211866 -0400
+@@ -100,6 +100,7 @@
+ #define __HYPERVISOR_kexec_op             37
+ #define __HYPERVISOR_tmem_op              38
+ #define __HYPERVISOR_xc_reserved_op       39 /* reserved for XenClient */
++#define __HYPERVISOR_syscall_service_op   40
+ 
+ /* Architecture-specific hypercall definitions. */
+ #define __HYPERVISOR_arch_0               48
+diff -urN xen-4.2.0/xen/include/xen/hypercall.h xen-4.2.0-new/xen/include/xen/hypercall.h
+--- xen-4.2.0/xen/include/xen/hypercall.h	2012-09-17 06:21:20.000000000 -0400
++++ xen-4.2.0-new/xen/include/xen/hypercall.h	2013-09-23 23:45:28.249211865 -0400
+@@ -7,6 +7,7 @@
+ 
+ #include <xen/types.h>
+ #include <xen/time.h>
++#include <xen/syscall_service.h>
+ #include <public/xen.h>
+ #include <public/domctl.h>
+ #include <public/sysctl.h>
+@@ -140,6 +141,9 @@
+ extern long
+ do_xenoprof_op(int op, XEN_GUEST_HANDLE(void) arg);
+ 
++extern int
++do_syscall_service_op(int op, int sysid, XEN_GUEST_HANDLE(void) ptr);
++
+ #ifdef CONFIG_COMPAT
+ 
+ extern int
+diff -urN xen-4.2.0/xen/include/xen/_syscall_defs.h xen-4.2.0-new/xen/include/xen/_syscall_defs.h
+--- xen-4.2.0/xen/include/xen/_syscall_defs.h	1969-12-31 19:00:00.000000000 -0500
++++ xen-4.2.0-new/xen/include/xen/_syscall_defs.h	2013-09-23 23:47:16.793216368 -0400
+@@ -0,0 +1,53 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2013 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_DEFS_H
++#define _SYSCALL_COMMON_DEFS_H 1
++
++typedef struct syscall_ptr {
++	size_t index; /* Must be first! */
++	size_t stamp;
++} __attribute__ ((aligned(sizeof(size_t) * 2))) syscall_ptr_t;
++
++#define SYSCALL_NULL_ENTRY			(size_t) (-1L)
++#define SYSCALL_ERROR_ENTRY			(size_t) (-2L)
++#define SYSCALL_REPEAT_ENTRY		(size_t) (-3L)
++
++#define VOLATILE_READ(x)		(*(volatile __typeof__(x) *) &(x))
++#define VOLATILE_READ_FAULT(x) ({		\
++	__typeof__(x) __r;					\
++	if (__get_user(__r, &(x)) != 0)		\
++		goto error_fault;				\
++	__r;								\
++})
++
++#define VOLATILE_READ_FAULT_PTR(x) ({				\
++	__typeof__(x) __r;								\
++	if (__get_user(__r.index, &(x).index) != 0)		\
++		goto error_fault;							\
++	if (__get_user(__r.stamp, &(x).stamp) != 0)		\
++		goto error_fault;							\
++	__r;											\
++})
++
++#endif /* !_SYSCALL_COMMON_DEFS_H */
+diff -urN xen-4.2.0/xen/include/xen/_syscall.h xen-4.2.0-new/xen/include/xen/_syscall.h
+--- xen-4.2.0/xen/include/xen/_syscall.h	1969-12-31 19:00:00.000000000 -0500
++++ xen-4.2.0-new/xen/include/xen/_syscall.h	2013-09-23 23:46:59.569215653 -0400
+@@ -0,0 +1,243 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_SYSCALL_H
++#define _SYSCALL_COMMON_SYSCALL_H 1
++
++#include "_syscall_defs.h"
++
++/* Hypercall parameters */
++#define SYSCALL_SERVICE_PREPARE			0
++#define SYSCALL_SERVICE_CANCEL			1
++#define SYSCALL_SERVICE_CONNECT			2
++#define SYSCALL_SERVICE_DISCONNECT		3
++#define SYSCALL_SERVICE_CLEANUP			4
++#define SYSCALL_SERVICE_REGISTER		5
++#define SYSCALL_SERVICE_UNREGISTER		6
++
++/* Syscall service states */
++#define SYSCALL_STATE_TERMINATED		0
++#define SYSCALL_STATE_RUNNING			(unsigned long) (LONG_MIN)
++
++/* Main ring buffer requests */
++#define SYSCALL_ACTION_INIT				0
++#define SYSCALL_ACTION_ADD				1
++#define SYSCALL_ACTION_REMOVE			2
++#define SYSCALL_ACTION_EXPAND_MAP		3
++#define SYSCALL_ACTION_SHRINK_MAP		4
++
++#define SYSCALL_PREALLOC_PROCESSES		8
++
++#define SYSCALL_SYSID_NETWORK			0
++#define SYSCALL_SYSID_STORAGE			1
++#define SYSCALL_SYSIDS					2
++
++#define SYSCALL_QUEUE_ORDER				3
++#define SYSCALL_QUEUE_PAGES				(1U << SYSCALL_QUEUE_ORDER)
++#define SYSCALL_CALL_PAGES				8
++#define SYSCALL_PAGES					(SYSCALL_CALL_PAGES + 1)
++#define SYSCALL_DATA_SHARED_PAGES		8192
++#define SYSCALL_TOTAL_SHARED_PAGES		(SYSCALL_PAGES + SYSCALL_DATA_SHARED_PAGES)
++#define SYSCALL_MAX_EXPAND_MAP_GREFS		80
++#define SYSCALL_MAX_GROUPS					16
++#define SYSCALL_FDTABLE_PATH				"/tmp/sclib_"
++
++#define SYSCALL_IOCTL_MAGIC					0x81
++#define SYSCALL_DRIVER_IOCTL_REGISTER		_IO(SYSCALL_IOCTL_MAGIC, 0)
++#define SYSCALL_DRIVER_IOCTL_EXPAND_BUFFER	_IO(SYSCALL_IOCTL_MAGIC, 1)
++#define SYSCALL_DRIVER_IOCTL_SHRINK_BUFFER	_IO(SYSCALL_IOCTL_MAGIC, 2)
++#define SYSCALL_DRIVER_IOCTL_WAKE			_IO(SYSCALL_IOCTL_MAGIC, 3)
++#define SYSCALL_SERVICE_IOCTL_CONNECT		_IO(SYSCALL_IOCTL_MAGIC, 8)
++#define SYSCALL_SERVICE_IOCTL_DISCONNECT	_IO(SYSCALL_IOCTL_MAGIC, 9)
++#define SYSCALL_SERVICE_IOCTL_CLEANUP		_IO(SYSCALL_IOCTL_MAGIC, 10)
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct syscall_connect {
++	uint32_t	domid;
++	uint32_t	main_port;
++	uint32_t	ring_port;
++	uint32_t	disconnect_port;
++	uint32_t	wake_port;
++	uint32_t	main_gref;
++	uint32_t	front_ring_gref;
++	uint32_t	back_ring_gref;
++	uint32_t	wake_gref;
++} syscall_connect_t;
++
++//#define SYSCALL_DEBUG
++
++#ifdef __KERNEL__
++
++#include <xen/interface/io/ring.h>
++
++typedef struct syscall_prealloc {
++	uint32_t	id;
++	uint32_t	gref[SYSCALL_CALL_PAGES];
++} syscall_prealloc_t;
++
++typedef struct syscall_prealloc_process {
++	syscall_ptr_t alloc_top;
++	syscall_ptr_t free_top;
++	size_t next[SYSCALL_PREALLOC_PROCESSES];
++	syscall_prealloc_t entry[SYSCALL_PREALLOC_PROCESSES];
++} syscall_prealloc_process_t;
++
++struct sccom_request_add {
++	uint32_t	id;
++	uint32_t	ptgid;
++	uint32_t	gref[SYSCALL_QUEUE_PAGES];
++	struct cred_move	cm;
++	gid_t	_pad[SYSCALL_MAX_GROUPS];	/* Groups for credentials */
++};
++
++struct sccom_request_memory {
++	uint32_t	num;
++};
++
++struct sccom_response {
++	uint32_t	tgid;
++	uint32_t	num;
++	union {
++		syscall_prealloc_t	prealloc[SYSCALL_PREALLOC_PROCESSES];
++		uint32_t			grefs[SYSCALL_MAX_EXPAND_MAP_GREFS];
++	};
++};
++
++struct sccom_request {
++	int			id;
++	uint32_t	tgid;
++	union {
++		struct sccom_request_add	add;
++		struct sccom_request_memory	mem;
++	};
++};
++
++struct screq_response {
++	int			id;
++	uint32_t	tgid;
++	uint32_t	pid;
++};
++
++struct screq_request {
++	char		pad[0]; /* Just a stub */
++};
++
++#define RING_FULL_RSP(_r)	\
++	(RING_SIZE(_r) - ((_r)->rsp_prod_pvt - (_r)->sring->rsp_event) == 1)
++
++DEFINE_RING_TYPES(sccom, struct sccom_request, struct sccom_response);
++DEFINE_RING_TYPES(screq, struct screq_request, struct screq_response);
++
++#ifdef SYSCALL_DEBUG
++# define SYSCALL_TRACE(fmt, ...)	printk(KERN_INFO "[SC-CALL:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++#else
++# define SYSCALL_TRACE(fmt, ...)
++#endif
++
++#define SYSCALL_WARNING(fmt, ...)		printk(KERN_WARNING "[SC-WARNING:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++
++#define SYSCALL_ERROR(fmt, ...)		printk(KERN_ERR "[SC-ERROR:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++
++#endif /* __KERNEL__ */
++
++#define SYSCALL_REQUEST_FD			0x7FFFFFFF
++#define SYSCALL_REQUEST_NOTIFY		0x7FFFFFFF
++#define SYSCALL_REQUEST_SIGNAL(x)	((x) | 0x80000000)
++
++#define SYSCALL_ENTRY_RQUEUE		0x80U
++#define SYSCALL_ENTRY_DONE			0xFFU
++
++/* Double word definition */
++#if defined(__x86_64__)
++typedef __int128_t syscall_sdw_t;
++typedef __uint128_t syscall_udw_t;
++# define SYSCALL_INT_PTR(x)				((int *) (x))	/* Little Endian */
++#elif defined(__i386__)
++typedef int64_t syscall_sdw_t;
++typedef uint64_t syscall_udw_t;
++# define SYSCALL_INT_PTR(x)				((int *) (x))	/* Little Endian */
++#endif
++
++#define syscall_entry_result_lower(x)	((x)->args[0])
++#define syscall_entry_result_upper(x)	((x)->args[1])
++
++#define syscall_entry_result_sw(x)		((x)->args[0])
++#define syscall_entry_result_dw(x)	\
++	(((syscall_udw_t) (x)->args[1] << (sizeof(long) * 8)) | (x)->args[0])
++
++#define syscall_result_lower(x)			((unsigned long) (x))
++#define syscall_result_upper(x)			((unsigned long) ((syscall_udw_t) (x) >> (sizeof(long) * 8)))
++
++struct pthread;
++
++typedef struct syscall_entry {
++	unsigned char id;
++	unsigned char signal;
++	unsigned short seq_num;
++	unsigned int task_id;
++	struct pthread *pd;
++	unsigned long args[6];
++} syscall_entry_t;
++
++#define SYSCALL_MAX_PTHREADS	((SYSCALL_QUEUE_PAGES * PAGE_SIZE - 4 * sizeof(syscall_ptr_t) - 2 * sizeof(long)) / (sizeof(syscall_ptr_t) + sizeof(void *)))
++#define SYSCALL_MAX_RQUEUE_SIZE	(SYSCALL_MAX_PTHREADS * (sizeof(syscall_ptr_t) + sizeof(void *)) + 4 * sizeof(syscall_ptr_t) + 2 * sizeof(long))
++
++struct syscall_queue {
++	syscall_ptr_t alloc_head;
++	syscall_ptr_t alloc_tail;
++	syscall_ptr_t free_head;
++	syscall_ptr_t free_tail;
++	syscall_ptr_t next[SYSCALL_MAX_PTHREADS];
++	void *entries[SYSCALL_MAX_PTHREADS];
++	unsigned long waiters;
++	unsigned long nkthreads;
++	char _pad[SYSCALL_QUEUE_PAGES * PAGE_SIZE - SYSCALL_MAX_RQUEUE_SIZE];
++};
++
++#define SYSCALL_MAX_ENTRIES		((SYSCALL_CALL_PAGES * PAGE_SIZE - 2 * sizeof(syscall_ptr_t)) / (sizeof(syscall_entry_t) + sizeof(size_t)))
++#define SYSCALL_MAX_CALL_SIZE	(SYSCALL_MAX_ENTRIES * sizeof(syscall_entry_t) + 2 * sizeof(syscall_ptr_t) + SYSCALL_MAX_ENTRIES * sizeof(size_t))
++
++typedef struct syscall_page {
++	syscall_entry_t	entry[SYSCALL_MAX_ENTRIES];
++	syscall_ptr_t alloc_top;
++	syscall_ptr_t free_top;
++	size_t next[SYSCALL_MAX_ENTRIES];
++	char _pad[SYSCALL_CALL_PAGES * PAGE_SIZE - SYSCALL_MAX_CALL_SIZE];
++} syscall_page_t;
++
++#define SYSCALL_WAKE_REQUESTED		0x100000000ULL
++#define SYSCALL_WAKE_IN_PROGRESS	0x80000000U
++
++typedef struct syscall_wake_page {
++	volatile uint64_t running_threads;
++	char _pad[PAGE_SIZE - sizeof(uint64_t)];
++} syscall_wake_page_t;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* !_SYSCALL_COMMON_SYSCALL_H */
+diff -urN xen-4.2.0/xen/include/xen/syscall_service.h xen-4.2.0-new/xen/include/xen/syscall_service.h
+--- xen-4.2.0/xen/include/xen/syscall_service.h	1969-12-31 19:00:00.000000000 -0500
++++ xen-4.2.0-new/xen/include/xen/syscall_service.h	2013-09-23 23:45:28.249211865 -0400
+@@ -0,0 +1,32 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _XEN_SYSCALL_SERVICE_H
++#define _XEN_SYSCALL_SERVICE_H 1
++
++#include <xen/types.h>
++#include <asm/atomic.h>
++#include <public/grant_table.h>
++#include "_syscall.h"
++
++#endif /* !_XEN_SYSCALL_SERVICE_H */

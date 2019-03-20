@@ -1,0 +1,2660 @@
+diff -urN linux-3.2.30/arch/x86/ia32/ia32entry.S linux-3.2.30-new/arch/x86/ia32/ia32entry.S
+--- linux-3.2.30/arch/x86/ia32/ia32entry.S	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/ia32/ia32entry.S	2013-09-23 20:33:39.462208205 -0400
+@@ -852,4 +852,13 @@
+ 	.quad sys_setns
+ 	.quad compat_sys_process_vm_readv
+ 	.quad compat_sys_process_vm_writev
++	.quad sys_rqueue_wait_notify
++	.quad sys_syscall_service_notify
++	.quad sys_syscall_service_select
++	.quad sys_syscall_service_poll
++	.quad sys_syscall_service_epoll_wait
++	.quad sys_syscall_service_chdir
++	.quad sys_syscall_service_fchdir
++	.quad sys_rqueue_wake
++	.quad sys_rqueue_wait
+ ia32_syscall_end:
+diff -urN linux-3.2.30/arch/x86/include/asm/processor.h linux-3.2.30-new/arch/x86/include/asm/processor.h
+--- linux-3.2.30/arch/x86/include/asm/processor.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/processor.h	2013-09-23 20:33:39.462208205 -0400
+@@ -619,7 +619,8 @@
+ }
+ 
+ typedef struct {
+-	unsigned long		seg;
++	unsigned long		end;
++	unsigned long		start;
+ } mm_segment_t;
+ 
+ 
+diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/include/asm/uaccess.h
+--- linux-3.2.30/arch/x86/include/asm/uaccess.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/uaccess.h	2013-09-23 20:33:39.462208205 -0400
+@@ -1,3 +1,8 @@
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #ifndef _ASM_X86_UACCESS_H
+ #define _ASM_X86_UACCESS_H
+ /*
+@@ -10,6 +15,12 @@
+ #include <asm/asm.h>
+ #include <asm/page.h>
+ 
++#  if defined(__x86_64__)
++#   define __DCMPXCHG_USER "cmpxchg16b"
++#  else
++#   define __DCMPXCHG_USER "cmpxchg8b"
++#  endif
++
+ #define VERIFY_READ 0
+ #define VERIFY_WRITE 1
+ 
+@@ -21,7 +32,8 @@
+  * For historical reasons, these macros are grossly misnamed.
+  */
+ 
+-#define MAKE_MM_SEG(s)	((mm_segment_t) { (s) })
++#define MAKE_MM_END_START(s,a)	((mm_segment_t) { .end = (s), .start = (a) })
++#define MAKE_MM_SEG(s)			MAKE_MM_END_START(s,0)
+ 
+ #define KERNEL_DS	MAKE_MM_SEG(-1UL)
+ #define USER_DS 	MAKE_MM_SEG(TASK_SIZE_MAX)
+@@ -30,18 +42,21 @@
+ #define get_fs()	(current_thread_info()->addr_limit)
+ #define set_fs(x)	(current_thread_info()->addr_limit = (x))
+ 
+-#define segment_eq(a, b)	((a).seg == (b).seg)
++#define segment_eq(a, b)	((a).end == (b).end && (a).start == (b).start)
+ 
+-#define __addr_ok(addr)					\
+-	((unsigned long __force)(addr) <		\
+-	 (current_thread_info()->addr_limit.seg))
++#define __addr_ok(addr)							\
++	((unsigned long __force)(addr) <			\
++	 (current_thread_info()->addr_limit.end) &&	\
++	 (unsigned long __force)(addr) >=			\
++	 (current_thread_info()->addr_limit.start)) 
+ 
+ /*
+  * Test whether a block of memory is a valid user space address.
+  * Returns 0 if the range is valid, nonzero otherwise.
+  *
+  * This is equivalent to the following test:
+- * (u33)addr + (u33)size > (u33)current->addr_limit.seg (u65 for x86_64)
++ * addr < current->addr_limit.start ||
++ * (u33)addr + (u33)size > (u33)current->addr_limit.end (u65 for x86_64)
+  *
+  * This needs 33-bit (65-bit for x86_64) arithmetic. We have a carry...
+  */
+@@ -50,10 +65,11 @@
+ ({									\
+ 	unsigned long flag, roksum;					\
+ 	__chk_user_ptr(addr);						\
+-	asm("add %3,%1 ; sbb %0,%0 ; cmp %1,%4 ; sbb $0,%0"		\
++	asm("cmp %5,%1 ; sbb %0,%0 ; add %3,%1 ; sbb $0,%0 ; cmp %1,%4 ; sbb $0,%0" \
+ 	    : "=&r" (flag), "=r" (roksum)				\
+ 	    : "1" (addr), "g" ((long)(size)),				\
+-	      "rm" (current_thread_info()->addr_limit.seg));		\
++	      "rm" (current_thread_info()->addr_limit.end),		\
++		  "rm" (current_thread_info()->addr_limit.start));	\
+ 	flag;								\
+ })
+ 
+@@ -218,6 +234,7 @@
+ #endif
+ 
+ extern void __put_user_bad(void);
++extern void __cmpxchg_user_bad(void);
+ 
+ /*
+  * Strange magic calling convention: pointer in %ecx,
+@@ -273,6 +290,46 @@
+ 	__ret_pu;						\
+ })
+ 
++#define __cmpxchg_user_size(r, x, y, ptr, size, retval, errret)			\
++do {									\
++	retval = 0;							\
++	__chk_user_ptr(ptr);						\
++	switch (size) {							\
++	case 1:								\
++		__cmpxchg_user_asm(r, x, y, ptr, retval, "b", "b", "q", errret);	\
++		break;							\
++	case 2:								\
++		__cmpxchg_user_asm(r, x, y, ptr, retval, "w", "w", "r", errret);	\
++		break;							\
++	case 4:								\
++		__cmpxchg_user_asm(r, x, y, ptr, retval, "l", "k", "r", errret);	\
++		break;							\
++	case 8:								\
++		__cmpxchg_user_asm_u64(r, x, y, ptr, retval, "q", "", "r", errret);	\
++		break;							\
++	default:							\
++		__cmpxchg_user_bad();					\
++	}								\
++} while (0)
++
++#define __dcmpxchg_user_nosize(r, xlo, xhi, ylo, yhi, ptr, retval, errret) \
++do {									\
++	size_t __dx;						\
++	retval = 0;							\
++	__chk_user_ptr(ptr);				\
++	asm volatile("1:	lock; "__DCMPXCHG_USER " %3\n"		\
++			 "setz %b1\n"	\
++		     "2:\n"						\
++		     ".section .fixup,\"ax\"\n"				\
++		     "3:	mov %4,%0\n"				\
++		     "	jmp 2b\n"					\
++		     ".previous\n"					\
++		     _ASM_EXTABLE(1b, 3b)				\
++		     : "+r"(retval), "=a" (r), "=d" (__dx), "+m" (__m(ptr))	\
++		     : "i" (errret), "1" (xlo), "2" (xhi), "b" (ylo), "c" (yhi)	\
++			 : "cc");	\
++} while (0)
++
+ #define __put_user_size(x, ptr, size, retval, errret)			\
+ do {									\
+ 	retval = 0;							\
+@@ -418,6 +475,20 @@
+ 	__pu_err;						\
+ })
+ 
++#define __cmpxchg_user_nocheck(r, x, y, ptr, size)			\
++({								\
++	int __cmpx_err;						\
++	__cmpxchg_user_size((r), (x), (y), (ptr), (size), __cmpx_err, -EFAULT);	\
++	__cmpx_err;						\
++})
++
++#define __dcmpxchg_user_nocheck(r, xlo, xhi, ylo, yhi, ptr)			\
++({								\
++	int __cmpx_err;						\
++	__dcmpxchg_user_nosize((r), (xlo), (xhi), (ylo), (yhi), (ptr), __cmpx_err, -EFAULT);	\
++	__cmpx_err;						\
++})
++
+ #define __get_user_nocheck(x, ptr, size)				\
+ ({									\
+ 	int __gu_err;							\
+@@ -431,6 +502,24 @@
+ struct __large_struct { unsigned long buf[100]; };
+ #define __m(x) (*(struct __large_struct __user *)(x))
+ 
++#define __cmpxchg_user_asm(r, x, y, addr, err, itype, rtype, ltype, errret)	\
++	asm volatile("1:	lock; cmpxchg"itype" %"rtype"3,%2\n"		\
++		     "2:\n"						\
++		     ".section .fixup,\"ax\"\n"				\
++		     "3:	mov %4,%0\n"				\
++		     "	jmp 2b\n"					\
++		     ".previous\n"					\
++		     _ASM_EXTABLE(1b, 3b)				\
++		     : "=r"(err), "=a" (r), "+m" (__m(addr))					\
++		     : ltype(y), "i" (errret), "1" (x), "0" (err)	\
++			 : "cc")
++
++#ifdef CONFIG_X86_32
++# define __cmpxchg_user_asm_u64(...)	__cmpxchg_user_bad()
++# else
++# define __cmpxchg_user_asm_u64			__cmpxchg_user_asm
++#endif
++
+ /*
+  * Tell gcc we read from memory instead of writing: this is because
+  * we do not write to any memory gcc knows about, so there are no
+@@ -513,6 +602,13 @@
+ #define __put_user(x, ptr)						\
+ 	__put_user_nocheck((__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
+ 
++#define __cmpxchg_user(r, x, y, ptr)						\
++	__cmpxchg_user_nocheck((__typeof__(*(ptr)))(r), (__typeof__(*(ptr)))(x), (__typeof__(*(ptr)))(y), (ptr), sizeof(*(ptr)))
++
++#define __dcmpxchg_user(r, xlo, xhi, ylo, yhi, ptr)						\
++	__dcmpxchg_user_nocheck((r), (__typeof__(*(ptr)))(xlo), (__typeof__(*(ptr)))(xhi), (__typeof__(*(ptr)))(ylo), (__typeof__(*(ptr)))(yhi), (ptr))
++
++
+ #define __get_user_unaligned __get_user
+ #define __put_user_unaligned __put_user
+ 
+diff -urN linux-3.2.30/arch/x86/include/asm/unistd_32.h linux-3.2.30-new/arch/x86/include/asm/unistd_32.h
+--- linux-3.2.30/arch/x86/include/asm/unistd_32.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/unistd_32.h	2013-09-23 20:33:39.462208205 -0400
+@@ -354,10 +354,19 @@
+ #define __NR_setns		346
+ #define __NR_process_vm_readv	347
+ #define __NR_process_vm_writev	348
++#define __NR_rqueue_wait_notify	349
++#define __NR_syscall_service_notify 350
++#define __NR_syscall_service_select	351
++#define __NR_syscall_service_poll	352
++#define __NR_syscall_service_epoll_wait	353
++#define __NR_syscall_service_chdir 354
++#define __NR_syscall_service_fchdir 355
++#define __NR_rqueue_wake 356
++#define __NR_rqueue_wait 357
+ 
+ #ifdef __KERNEL__
+ 
+-#define NR_syscalls 349
++#define NR_syscalls 358
+ 
+ #define __ARCH_WANT_IPC_PARSE_VERSION
+ #define __ARCH_WANT_OLD_READDIR
+diff -urN linux-3.2.30/arch/x86/include/asm/unistd_64.h linux-3.2.30-new/arch/x86/include/asm/unistd_64.h
+--- linux-3.2.30/arch/x86/include/asm/unistd_64.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/unistd_64.h	2013-09-23 20:33:39.466208204 -0400
+@@ -686,6 +686,24 @@
+ __SYSCALL(__NR_process_vm_readv, sys_process_vm_readv)
+ #define __NR_process_vm_writev			311
+ __SYSCALL(__NR_process_vm_writev, sys_process_vm_writev)
++#define __NR_rqueue_wait_notify		312
++__SYSCALL(__NR_rqueue_wait_notify, sys_rqueue_wait_notify)
++#define __NR_syscall_service_notify		313
++__SYSCALL(__NR_syscall_service_notify, sys_syscall_service_notify)
++#define __NR_syscall_service_select		314
++__SYSCALL(__NR_syscall_service_select, sys_syscall_service_select)
++#define __NR_syscall_service_poll		315
++__SYSCALL(__NR_syscall_service_poll, sys_syscall_service_poll)
++#define __NR_syscall_service_epoll_wait	316
++__SYSCALL(__NR_syscall_service_epoll_wait, sys_syscall_service_epoll_wait)
++#define __NR_syscall_service_chdir		317
++__SYSCALL(__NR_syscall_service_chdir, sys_syscall_service_chdir)
++#define __NR_syscall_service_fchdir	318
++__SYSCALL(__NR_syscall_service_fchdir, sys_syscall_service_fchdir)
++#define __NR_rqueue_wake	319
++__SYSCALL(__NR_rqueue_wake, sys_rqueue_wake)
++#define __NR_rqueue_wait	320
++__SYSCALL(__NR_rqueue_wait, sys_rqueue_wait)
+ 
+ #ifndef __NO_STUBS
+ #define __ARCH_WANT_OLD_READDIR
+diff -urN linux-3.2.30/arch/x86/include/asm/xen/hypercall.h linux-3.2.30-new/arch/x86/include/asm/xen/hypercall.h
+--- linux-3.2.30/arch/x86/include/asm/xen/hypercall.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/xen/hypercall.h	2013-09-23 20:33:39.466208204 -0400
+@@ -464,6 +464,13 @@
+ 	return _hypercall1(int, tmem_op, op);
+ }
+ 
++static inline int
++HYPERVISOR_syscall_service_op(
++	int op, int sysid, void *ptr)
++{
++	return _hypercall3(int, syscall_service_op, op, sysid, ptr);
++}
++
+ static inline void
+ MULTI_fpu_taskswitch(struct multicall_entry *mcl, int set)
+ {
+diff -urN linux-3.2.30/arch/x86/kernel/Makefile linux-3.2.30-new/arch/x86/kernel/Makefile
+--- linux-3.2.30/arch/x86/kernel/Makefile	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/kernel/Makefile	2013-09-23 20:33:39.466208204 -0400
+@@ -21,6 +21,7 @@
+ obj-y			+= traps.o irq.o irq_$(BITS).o dumpstack_$(BITS).o
+ obj-y			+= time.o ioport.o ldt.o dumpstack.o nmi.o
+ obj-y			+= setup.o x86_init.o i8259.o irqinit.o jump_label.o
++obj-y			+= syscall_service.o
+ obj-$(CONFIG_IRQ_WORK)  += irq_work.o
+ obj-y			+= probe_roms.o
+ obj-$(CONFIG_X86_32)	+= sys_i386_32.o i386_ksyms_32.o
+diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x86/kernel/syscall_service.c
+--- linux-3.2.30/arch/x86/kernel/syscall_service.c	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.2.30-new/arch/x86/kernel/syscall_service.c	2013-09-23 20:33:39.466208204 -0400
+@@ -0,0 +1,282 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include <linux/module.h>
++#include <linux/linkage.h>
++#include <linux/sched.h>
++#include <linux/semaphore.h>
++#include <linux/syscalls.h>
++#include <linux/syscall_service.h>
++#include <linux/uaccess.h>
++#include <linux/eventpoll.h>
++#include <linux/wait.h>
++
++#ifndef EPOLLIN
++# define EPOLLIN	0x1
++#endif
++
++#ifndef MIN
++# define MIN(x,y) (((x) < (y)) ? (x) : (y))
++#endif
++
++#include <linux/_syscall.h>
++#include <linux/_syscall_queue.h>
++
++void syscall_notify_stub(int sysid, int id, uint32_t tgid, uint32_t tid)
++{
++}
++
++syscall_notify_t syscall_notify = &syscall_notify_stub;
++
++EXPORT_SYMBOL(syscall_notify_stub);
++EXPORT_SYMBOL(syscall_notify);
++
++SYSCALL_DEFINE1(rqueue_wake, unsigned long, nr)
++{
++	struct task_struct *group = current->group_leader;
++	wake_up_nr(&group->rqueue_wq, nr);
++	return 0;
++}
++
++SYSCALL_DEFINE1(rqueue_wait, void __user **, ptr)
++{
++	struct task_struct *group = current->group_leader;
++	struct syscall_queue *rqueue = group->rqueue;
++	void *result = result;
++	size_t idx;
++	long err;
++
++	err = wait_event_interruptible(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++	if (!err) {
++		if ((ssize_t) idx < 0 || put_user(result, ptr))
++			return -EFAULT;
++		return idx;
++	}
++	return err;
++}
++
++SYSCALL_DEFINE4(rqueue_wait_notify, int, sysid, unsigned char, id, struct syscall_entry __user *, entry, void __user **, ptr)
++{
++	struct task_struct *group = current->group_leader;
++	struct syscall_queue *rqueue = group->rqueue;
++	void *result = result;
++	unsigned long flags;
++	unsigned short seq_num;
++	unsigned char val, id_notify = id + SYSCALL_ENTRY_RQUEUE;
++	size_t idx;
++	int signr;
++
++	if (unlikely((unsigned int) sysid >= SYSCALL_SYSIDS ||
++		!access_ok(VERIFY_WRITE, entry, sizeof(struct syscall_entry)))) {
++		return -EINVAL;
++	}
++	if (unlikely(__cmpxchg_user(val, id, id_notify, &entry->id)))
++		return -EFAULT;
++	if (val == SYSCALL_ENTRY_DONE) /* Result has been produced but not sent */
++		return 0;
++	if (wait_event_interruptible(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY)) {
++		if (unlikely(__cmpxchg_user(val, id_notify, id, &entry->id)))
++			return -EFAULT;
++		if (val == SYSCALL_ENTRY_DONE) { /* Result has been just sent */
++			wait_event_killable(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++			goto done;
++		}
++		if (unlikely(__get_user(seq_num, &entry->seq_num) != 0))
++			return -EFAULT;
++		spin_lock_irqsave(&current->sighand->siglock, flags);
++		signr = next_signal(&current->pending, &current->blocked);
++		if (!signr) {
++			signr = next_signal(&current->signal->shared_pending,
++								&current->blocked);
++		}
++		if (signr) {
++			if (current->sighand->action[signr-1].sa.sa_flags & SA_RESTART)
++				signr = 0;
++		}
++		spin_unlock_irqrestore(&current->sighand->siglock, flags);
++		if (signr) {
++			if (unlikely(__put_user(1, &entry->signal) != 0))
++				return -EFAULT;
++			syscall_notify(sysid, SYSCALL_REQUEST_SIGNAL(seq_num), current->tgid, current->pid);
++			if (unlikely(__cmpxchg_user(val, id, id_notify, &entry->id)))
++				return -EFAULT;
++			if (val != SYSCALL_ENTRY_DONE) { /* Result has not been produced */
++				wait_event_killable(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++				goto done;
++			}
++			return SYSCALL_NULL_ENTRY;
++		}
++		return -ERESTARTSYS;
++	}
++
++done:
++	if ((ssize_t) idx < 0 || put_user(result, ptr))
++		return -EFAULT;
++	return idx; /* Complete, exit from system call */
++}
++
++SYSCALL_DEFINE5(syscall_service_select, struct syscall_efd __user *, ptr,
++	fd_set __user *, inp, fd_set __user *, outp, fd_set __user *, exp,
++	struct timeval __user *, tvp)
++{
++	struct syscall_efd param;
++	long ret;
++	uint64_t count;
++	size_t i;
++
++	if (copy_from_user(&param, ptr, sizeof(param)))
++		return -EFAULT;
++	count = -param.efd_num;
++	if (count >= SYSCALL_SYSIDS)
++		return -EINVAL;
++	ret = sys_select(param.n, inp, outp, exp, tvp);
++	if (count == 0) {
++		if (unlikely(put_user(0, &ptr->efd_num)))
++			return -EFAULT;
++		return ret;
++	}
++	if (ret > -ERESTARTSYS) {
++		for (i = 0; i < SYSCALL_SYSIDS; i++) {
++			if (param.efd[i] >= 0)
++				syscall_notify(i, param.efd[i], current->tgid, current->pid);
++		}
++		i = count;
++		do {
++			if (sys_read(param.efd[SYSCALL_SYSIDS],
++				(char *) &ptr->efd_num, sizeof(uint64_t)) == sizeof(uint64_t))
++				count--;
++		} while (--i != 0);
++		if (unlikely(put_user(count, &ptr->efd_num)))
++			return -EFAULT;
++	}
++	return ret;
++}
++
++SYSCALL_DEFINE3(syscall_service_poll, struct pollfd __user *, ufds,
++	struct syscall_efd __user, *ptr, long, timeout_msecs)
++{
++	struct syscall_efd param;
++	long ret;
++	uint64_t count;
++	size_t i;
++
++	if (copy_from_user(&param, ptr, sizeof(param)))
++		return -EFAULT;
++	count = -param.efd_num;
++	if (count >= SYSCALL_SYSIDS)
++		return -EINVAL;
++	ret = sys_poll(ufds, param.n, timeout_msecs);
++	if (param.efd_num == 0) {
++		if (unlikely(put_user(0, &ptr->efd_num)))
++			return -EFAULT;
++		return ret;
++	}
++	if (ret > -ERESTARTSYS) {
++		for (i = 0; i < SYSCALL_SYSIDS; i++) {
++			if (param.efd[i] >= 0)
++				syscall_notify(i, param.efd[i], current->tgid, current->pid);
++		}
++		i = count;
++		do {
++			if (sys_read(param.efd[SYSCALL_SYSIDS],
++				(char *) &ptr->efd_num, sizeof(uint64_t)) == sizeof(uint64_t))
++				count--;
++		} while (--i != 0);
++		if (unlikely(put_user(count, &ptr->efd_num)))
++			return -EFAULT;
++	}
++
++	return ret;
++}
++
++SYSCALL_DEFINE4(syscall_service_epoll_wait, struct syscall_efd __user *, ptr,
++	struct epoll_event __user *, events, int, maxevents, int, timeout)
++{
++	struct epoll_event event_efd;
++	struct syscall_efd param;
++	long ret;
++	uint64_t count;
++	size_t i;
++
++	if (copy_from_user(&param, ptr, sizeof(param)))
++		return -EFAULT;
++	count = -param.efd_num;
++	if (count >= SYSCALL_SYSIDS)
++		return -EINVAL;
++	if (count == 0) {
++		ret = sys_epoll_wait(param.n, events, maxevents, timeout);
++		if (unlikely(put_user(0, &ptr->efd_num)))
++			return -EFAULT;
++		return ret;
++	}
++	event_efd.events = EPOLLIN | EPOLLEFD;
++	event_efd.data = 0;
++	do_epoll_ctl(param.n, EPOLL_CTL_ADD, param.efd[SYSCALL_SYSIDS], &event_efd);
++	ret = sys_epoll_wait(param.n, events, maxevents, timeout);
++	if (ret > -ERESTARTSYS) {
++		do_epoll_ctl(param.n, EPOLL_CTL_DEL, param.efd[SYSCALL_SYSIDS], &event_efd);
++		for (i = 0; i < SYSCALL_SYSIDS; i++) {
++			if (param.efd[i] >= 0)
++				syscall_notify(i, param.efd[i], current->tgid, current->pid);
++		}
++		i = count;
++		do {
++			if (sys_read(param.efd[SYSCALL_SYSIDS],
++				(char *) &ptr->efd_num, sizeof(uint64_t)) == sizeof(uint64_t))
++				count--;
++		} while (--i != 0);
++		if (unlikely(put_user(count, &ptr->efd_num)))
++			return -EFAULT;
++	}
++	return ret;
++}
++
++SYSCALL_DEFINE1(syscall_service_notify, struct syscall_efd __user *, ptr)
++{
++	struct syscall_efd param;
++	uint64_t count;
++	size_t i;
++
++	if (copy_from_user(&param, ptr, sizeof(param)))
++		return -EFAULT;
++	count = -param.efd_num;
++	if (count == 0)
++		return 0;
++	if (count >= SYSCALL_SYSIDS)
++		return -EINVAL;
++	for (i = 0; i < SYSCALL_SYSIDS; i++) {
++		if (param.efd[i] >= 0)
++			syscall_notify(i, param.efd[i], current->tgid, current->pid);
++	}
++
++	i = count;
++	do {
++		if (sys_read(param.efd[SYSCALL_SYSIDS],
++			(char *) &ptr->efd_num, sizeof(uint64_t)) == sizeof(uint64_t))
++			count--;
++	} while (--i != 0);
++	if (unlikely(put_user(count, &ptr->efd_num)))
++		return -EFAULT;
++
++	return count;
++}
+diff -urN linux-3.2.30/arch/x86/kernel/syscall_table_32.S linux-3.2.30-new/arch/x86/kernel/syscall_table_32.S
+--- linux-3.2.30/arch/x86/kernel/syscall_table_32.S	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/kernel/syscall_table_32.S	2013-09-23 20:33:39.466208204 -0400
+@@ -348,3 +348,12 @@
+ 	.long sys_setns
+ 	.long sys_process_vm_readv
+ 	.long sys_process_vm_writev
++	.long sys_rqueue_wait_notify
++	.long sys_syscall_service_notify
++	.long sys_syscall_service_select
++	.long sys_syscall_service_poll
++	.long sys_syscall_service_epoll_wait
++	.long sys_syscall_service_chdir
++	.long sys_syscall_service_fchdir
++	.long sys_rqueue_wake
++	.long sys_rqueue_wait
+diff -urN linux-3.2.30/arch/x86/kernel/x8664_ksyms_64.c linux-3.2.30-new/arch/x86/kernel/x8664_ksyms_64.c
+--- linux-3.2.30/arch/x86/kernel/x8664_ksyms_64.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/arch/x86/kernel/x8664_ksyms_64.c	2013-09-23 20:33:39.466208204 -0400
+@@ -3,6 +3,7 @@
+ 
+ #include <linux/module.h>
+ #include <linux/smp.h>
++#include <linux/syscalls.h>
+ 
+ #include <net/checksum.h>
+ 
+@@ -37,6 +38,117 @@
+ 
+ EXPORT_SYMBOL(csum_partial);
+ 
++/* Syscall symbols */
++EXPORT_SYMBOL(sys_futex);
++EXPORT_SYMBOL(sys_open);
++EXPORT_SYMBOL(sys_eventfd);
++EXPORT_SYMBOL(sys_eventfd2);
++EXPORT_SYMBOL(sys_fdatasync);
++EXPORT_SYMBOL(sys_flock);
++EXPORT_SYMBOL(sys_fsync);
++EXPORT_SYMBOL(sys_fadvise64);
++EXPORT_SYMBOL(sys_pread64);
++EXPORT_SYMBOL(sys_pwrite64);
++EXPORT_SYMBOL(sys_ioctl);
++EXPORT_SYMBOL(sys_fcntl);
++EXPORT_SYMBOL(sys_newfstat);
++EXPORT_SYMBOL(sys_newfstatat);
++EXPORT_SYMBOL(sys_select);
++EXPORT_SYMBOL(sys_poll);
++EXPORT_SYMBOL(sys_epoll_wait);
++EXPORT_SYMBOL(sys_pselect6);
++EXPORT_SYMBOL(sys_ppoll);
++EXPORT_SYMBOL(sys_epoll_pwait);
++EXPORT_SYMBOL(sys_epoll_create);
++EXPORT_SYMBOL(sys_epoll_create1);
++EXPORT_SYMBOL(sys_sendfile64);
++EXPORT_SYMBOL(sys_splice);
++EXPORT_SYMBOL(sys_read);
++EXPORT_SYMBOL(sys_write);
++EXPORT_SYMBOL(sys_dup);
++EXPORT_SYMBOL(sys_socket);
++EXPORT_SYMBOL(sys_bind);
++EXPORT_SYMBOL(sys_connect);
++EXPORT_SYMBOL(sys_listen);
++EXPORT_SYMBOL(sys_accept);
++EXPORT_SYMBOL(sys_getsockname);
++EXPORT_SYMBOL(sys_getpeername);
++EXPORT_SYMBOL(sys_sendto);
++EXPORT_SYMBOL(sys_recvfrom);
++EXPORT_SYMBOL(sys_shutdown);
++EXPORT_SYMBOL(sys_setsockopt);
++EXPORT_SYMBOL(sys_getsockopt);
++EXPORT_SYMBOL(sys_sendmsg);
++EXPORT_SYMBOL(sys_recvmsg);
++EXPORT_SYMBOL(sys_accept4);
++EXPORT_SYMBOL(sys_setuid);
++EXPORT_SYMBOL(sys_setgid);
++EXPORT_SYMBOL(sys_setreuid);
++EXPORT_SYMBOL(sys_setregid);
++EXPORT_SYMBOL(sys_setresuid);
++EXPORT_SYMBOL(sys_setresgid);
++EXPORT_SYMBOL(sys_newuname);
++EXPORT_SYMBOL(sys_sethostname);
++EXPORT_SYMBOL(sys_setdomainname);
++EXPORT_SYMBOL(sys_prctl);
++EXPORT_SYMBOL(sys_capset);
++EXPORT_SYMBOL(sys_setgroups);
++EXPORT_SYMBOL(sys_unlink);
++EXPORT_SYMBOL(sys_io_setup);
++EXPORT_SYMBOL(sys_io_destroy);
++EXPORT_SYMBOL(sys_io_submit);
++EXPORT_SYMBOL(sys_io_cancel);
++EXPORT_SYMBOL(sys_io_getevents);
++EXPORT_SYMBOL(sys_syscall_service_fchdir);
++EXPORT_SYMBOL(sys_syscall_service_chdir);
++EXPORT_SYMBOL(sys_symlink);
++EXPORT_SYMBOL(sys_readlink);
++EXPORT_SYMBOL(sys_link);
++EXPORT_SYMBOL(sys_rename);
++EXPORT_SYMBOL(sys_chmod);
++EXPORT_SYMBOL(sys_fchmod);
++EXPORT_SYMBOL(sys_truncate);
++EXPORT_SYMBOL(sys_ftruncate);
++EXPORT_SYMBOL(sys_newstat);
++EXPORT_SYMBOL(sys_newlstat);
++EXPORT_SYMBOL(sys_chown);
++EXPORT_SYMBOL(sys_fchown);
++EXPORT_SYMBOL(sys_lseek);
++EXPORT_SYMBOL(sys_statfs);
++EXPORT_SYMBOL(sys_fstatfs);
++EXPORT_SYMBOL(sys_access);
++EXPORT_SYMBOL(sys_mknod);
++EXPORT_SYMBOL(sys_mkdir);
++EXPORT_SYMBOL(sys_rmdir);
++EXPORT_SYMBOL(sys_faccessat);
++EXPORT_SYMBOL(sys_fchmodat);
++EXPORT_SYMBOL(sys_fchownat);
++EXPORT_SYMBOL(sys_futimesat);
++EXPORT_SYMBOL(sys_mkdirat);
++EXPORT_SYMBOL(sys_mknodat);
++EXPORT_SYMBOL(sys_unlinkat);
++EXPORT_SYMBOL(sys_readlinkat);
++EXPORT_SYMBOL(sys_symlinkat);
++EXPORT_SYMBOL(sys_linkat);
++EXPORT_SYMBOL(sys_renameat);
++EXPORT_SYMBOL(sys_utimensat);
++EXPORT_SYMBOL(sys_utime);
++EXPORT_SYMBOL(sys_utimes);
++EXPORT_SYMBOL(sys_removexattr);
++EXPORT_SYMBOL(sys_lremovexattr);
++EXPORT_SYMBOL(sys_fremovexattr);
++EXPORT_SYMBOL(sys_listxattr);
++EXPORT_SYMBOL(sys_llistxattr);
++EXPORT_SYMBOL(sys_flistxattr);
++EXPORT_SYMBOL(sys_getxattr);
++EXPORT_SYMBOL(sys_lgetxattr);
++EXPORT_SYMBOL(sys_fgetxattr);
++EXPORT_SYMBOL(sys_setxattr);
++EXPORT_SYMBOL(sys_lsetxattr);
++EXPORT_SYMBOL(sys_fsetxattr);
++EXPORT_SYMBOL(sys_lchown);
++EXPORT_SYMBOL(sys_getdents64);
++
+ /*
+  * Export string functions. We normally rely on gcc builtin for most of these,
+  * but gcc sometimes decides not to inline them.
+diff -urN linux-3.2.30/fs/aio.c linux-3.2.30-new/fs/aio.c
+--- linux-3.2.30/fs/aio.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/aio.c	2013-09-23 20:33:39.466208204 -0400
+@@ -6,6 +6,9 @@
+  *
+  *	Copyright 2000, 2001, 2002 Red Hat, Inc.  All Rights Reserved.
+  *
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
+  *	See ../COPYING for licensing terms.
+  */
+ #include <linux/kernel.h>
+@@ -1601,7 +1604,7 @@
+ 	ssize_t ret;
+ 
+ 	/* enforce forwards compatibility on users */
+-	if (unlikely(iocb->aio_reserved1 || iocb->aio_reserved2)) {
++	if (unlikely(iocb->aio_reserved1)) {
+ 		pr_debug("EINVAL: io_submit: reserve field set\n");
+ 		return -EINVAL;
+ 	}
+diff -urN linux-3.2.30/fs/eventpoll.c linux-3.2.30-new/fs/eventpoll.c
+--- linux-3.2.30/fs/eventpoll.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/eventpoll.c	2013-09-23 20:33:39.470208204 -0400
+@@ -2,6 +2,9 @@
+  *  fs/eventpoll.c (Efficient event retrieval implementation)
+  *  Copyright (C) 2001,...,2009	 Davide Libenzi
+  *
++ *  Modifications for VM-Syscalls
++ *  Copyright (C) 2012 Ruslan Nikolaev
++ *
+  *  This program is free software; you can redistribute it and/or modify
+  *  it under the terms of the GNU General Public License as published by
+  *  the Free Software Foundation; either version 2 of the License, or
+@@ -33,6 +36,7 @@
+ #include <linux/bitops.h>
+ #include <linux/mutex.h>
+ #include <linux/anon_inodes.h>
++#include <linux/export.h>
+ #include <asm/uaccess.h>
+ #include <asm/system.h>
+ #include <asm/io.h>
+@@ -88,7 +92,8 @@
+  */
+ 
+ /* Epoll private bits inside the event mask */
+-#define EP_PRIVATE_BITS (EPOLLONESHOT | EPOLLET)
++#define EP_PRIVATE_BITS (EPOLLONESHOT | EPOLLET | EPOLLEFD)
++#define EP_EFD_COUNT_FLAG	0x40000000
+ 
+ /* Maximum number of nesting allowed inside epoll sets */
+ #define EP_MAX_NESTS 4
+@@ -1246,7 +1251,8 @@
+ 	 * holding "mtx" during this call.
+ 	 */
+ 	for (eventcnt = 0, uevent = esed->events;
+-	     !list_empty(head) && eventcnt < esed->maxevents;) {
++	     !list_empty(head) &&
++		 	(eventcnt & ~EP_EFD_COUNT_FLAG) < esed->maxevents;) {
+ 		epi = list_first_entry(head, struct epitem, rdllink);
+ 
+ 		list_del_init(&epi->rdllink);
+@@ -1261,13 +1267,17 @@
+ 		 * can change the item.
+ 		 */
+ 		if (revents) {
+-			if (__put_user(revents, &uevent->events) ||
+-			    __put_user(epi->event.data, &uevent->data)) {
+-				list_add(&epi->rdllink, head);
+-				return eventcnt ? eventcnt : -EFAULT;
++			if (!(epi->event.events & EPOLLEFD)) {
++				if (__put_user(revents, &uevent->events) ||
++				    __put_user(epi->event.data, &uevent->data)) {
++					list_add(&epi->rdllink, head);
++					return eventcnt ? eventcnt : -EFAULT;
++				}
++				eventcnt++;
++				uevent++;
++			} else {
++				eventcnt |= EP_EFD_COUNT_FLAG; /* Make it non zero */
+ 			}
+-			eventcnt++;
+-			uevent++;
+ 			if (epi->event.events & EPOLLONESHOT)
+ 				epi->event.events &= EP_PRIVATE_BITS;
+ 			else if (!(epi->event.events & EPOLLET)) {
+@@ -1405,6 +1415,9 @@
+ 	    !(res = ep_send_events(ep, events, maxevents)) && !timed_out)
+ 		goto fetch_events;
+ 
++	if (likely(res >= 0))
++		res &= ~EP_EFD_COUNT_FLAG;
++
+ 	return res;
+ }
+ 
+@@ -1564,20 +1577,14 @@
+  * the eventpoll file that enables the insertion/removal/change of
+  * file descriptors inside the interest set.
+  */
+-SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
+-		struct epoll_event __user *, event)
++
++int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *epds)
+ {
+ 	int error;
+ 	int did_lock_epmutex = 0;
+ 	struct file *file, *tfile;
+ 	struct eventpoll *ep;
+ 	struct epitem *epi;
+-	struct epoll_event epds;
+-
+-	error = -EFAULT;
+-	if (ep_op_has_event(op) &&
+-	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
+-		goto error_return;
+ 
+ 	/* Get the "struct file *" for the eventpoll file */
+ 	error = -EBADF;
+@@ -1650,8 +1657,8 @@
+ 	switch (op) {
+ 	case EPOLL_CTL_ADD:
+ 		if (!epi) {
+-			epds.events |= POLLERR | POLLHUP;
+-			error = ep_insert(ep, &epds, tfile, fd);
++			epds->events |= POLLERR | POLLHUP;
++			error = ep_insert(ep, epds, tfile, fd);
+ 		} else
+ 			error = -EEXIST;
+ 		clear_tfile_check_list();
+@@ -1664,8 +1671,8 @@
+ 		break;
+ 	case EPOLL_CTL_MOD:
+ 		if (epi) {
+-			epds.events |= POLLERR | POLLHUP;
+-			error = ep_modify(ep, epi, &epds);
++			epds->events |= POLLERR | POLLHUP;
++			error = ep_modify(ep, epi, epds);
+ 		} else
+ 			error = -ENOENT;
+ 		break;
+@@ -1684,6 +1691,19 @@
+ 	return error;
+ }
+ 
++EXPORT_SYMBOL_GPL(do_epoll_ctl);
++
++SYSCALL_DEFINE4(epoll_ctl, int, epfd, int, op, int, fd,
++		struct epoll_event __user *, event)
++{
++	struct epoll_event epds;
++	if (ep_op_has_event(op) &&
++	    copy_from_user(&epds, event, sizeof(struct epoll_event)))
++		return -EFAULT;
++
++	return do_epoll_ctl(epfd, op, fd, &epds);
++}
++
+ /*
+  * Implement the event wait interface for the eventpoll file. It is the kernel
+  * part of the user space epoll_wait(2).
+diff -urN linux-3.2.30/fs/fcntl.c linux-3.2.30-new/fs/fcntl.c
+--- linux-3.2.30/fs/fcntl.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/fcntl.c	2013-09-23 20:33:39.470208204 -0400
+@@ -835,14 +835,14 @@
+ 	 * Exceptions: O_NONBLOCK is a two bit define on parisc; O_NDELAY
+ 	 * is defined as O_NONBLOCK on some platforms and not on others.
+ 	 */
+-	BUILD_BUG_ON(19 - 1 /* for O_RDONLY being 0 */ != HWEIGHT32(
++	BUILD_BUG_ON(20 - 1 /* for O_RDONLY being 0 */ != HWEIGHT32(
+ 		O_RDONLY	| O_WRONLY	| O_RDWR	|
+ 		O_CREAT		| O_EXCL	| O_NOCTTY	|
+ 		O_TRUNC		| O_APPEND	| /* O_NONBLOCK	| */
+ 		__O_SYNC	| O_DSYNC	| FASYNC	|
+ 		O_DIRECT	| O_LARGEFILE	| O_DIRECTORY	|
+ 		O_NOFOLLOW	| O_NOATIME	| O_CLOEXEC	|
+-		__FMODE_EXEC	| O_PATH
++		__FMODE_EXEC	| O_PATH | O_NOSIGNAL
+ 		));
+ 
+ 	fasync_cache = kmem_cache_create("fasync_cache",
+diff -urN linux-3.2.30/fs/file.c linux-3.2.30-new/fs/file.c
+--- linux-3.2.30/fs/file.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/file.c	2013-09-23 20:33:39.470208204 -0400
+@@ -396,6 +396,8 @@
+ 	return NULL;
+ }
+ 
++EXPORT_SYMBOL_GPL(dup_fd);
++
+ static void __devinit fdtable_defer_list_init(int cpu)
+ {
+ 	struct fdtable_defer *fddef = &per_cpu(fdtable_defer_list, cpu);
+diff -urN linux-3.2.30/fs/file_table.c linux-3.2.30-new/fs/file_table.c
+--- linux-3.2.30/fs/file_table.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/file_table.c	2013-09-23 20:33:39.470208204 -0400
+@@ -275,8 +275,15 @@
+ 
+ struct file *fget(unsigned int fd)
+ {
++	return fget_task(fd, current);
++}
++
++EXPORT_SYMBOL(fget);
++
++struct file *fget_task(unsigned int fd, struct task_struct *task)
++{
+ 	struct file *file;
+-	struct files_struct *files = current->files;
++	struct files_struct *files = task->files;
+ 
+ 	rcu_read_lock();
+ 	file = fcheck_files(files, fd);
+@@ -291,7 +298,7 @@
+ 	return file;
+ }
+ 
+-EXPORT_SYMBOL(fget);
++EXPORT_SYMBOL(fget_task);
+ 
+ struct file *fget_raw(unsigned int fd)
+ {
+diff -urN linux-3.2.30/fs/namei.c linux-3.2.30-new/fs/namei.c
+--- linux-3.2.30/fs/namei.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/namei.c	2013-09-23 20:33:39.470208204 -0400
+@@ -14,6 +14,11 @@
+ /* [Feb-Apr 2000, AV] Rewrite to the new namespace architecture.
+  */
+ 
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #include <linux/init.h>
+ #include <linux/module.h>
+ #include <linux/slab.h>
+@@ -118,18 +123,10 @@
+ static int do_getname(const char __user *filename, char *page)
+ {
+ 	int retval;
+-	unsigned long len = PATH_MAX;
+-
+-	if (!segment_eq(get_fs(), KERNEL_DS)) {
+-		if ((unsigned long) filename >= TASK_SIZE)
+-			return -EFAULT;
+-		if (TASK_SIZE - (unsigned long) filename < PATH_MAX)
+-			len = TASK_SIZE - (unsigned long) filename;
+-	}
+ 
+-	retval = strncpy_from_user(page, filename, len);
++	retval = strncpy_from_user(page, filename, PATH_MAX);
+ 	if (retval > 0) {
+-		if (retval < len)
++		if (retval < PATH_MAX)
+ 			return 0;
+ 		return -ENAMETOOLONG;
+ 	} else if (!retval)
+diff -urN linux-3.2.30/fs/open.c linux-3.2.30-new/fs/open.c
+--- linux-3.2.30/fs/open.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/fs/open.c	2013-09-23 20:33:39.470208204 -0400
+@@ -4,6 +4,11 @@
+  *  Copyright (C) 1991, 1992  Linus Torvalds
+  */
+ 
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #include <linux/string.h>
+ #include <linux/mm.h>
+ #include <linux/file.h>
+@@ -418,6 +423,85 @@
+ 	return error;
+ }
+ 
++SYSCALL_DEFINE3(syscall_service_chdir, const char __user *, filename, char __user *, buf, size_t, len)
++{
++	char *kbuf, *pathstr;
++	ssize_t pathlen;
++	struct path path;
++
++	kbuf = (char *) __get_free_page(GFP_KERNEL);
++	if (!kbuf)
++		return -ENOMEM;
++	pathlen = user_path_dir(filename, &path);
++	if (pathlen)
++		goto out;
++
++	pathlen = inode_permission(path.dentry->d_inode, MAY_EXEC | MAY_CHDIR);
++	if (pathlen)
++		goto dput_and_out;
++
++	pathstr = d_path(&path, kbuf, PAGE_SIZE);
++	pathlen = strlen(pathstr) + 1;
++	if ((size_t) pathlen > len) {
++		pathlen = -ENAMETOOLONG;
++		goto dput_and_out;
++	}
++	if (copy_to_user(buf, pathstr, pathlen)) {
++		pathlen = -EFAULT;
++		goto dput_and_out;
++	}
++	set_fs_pwd(current->fs, &path);
++
++dput_and_out:
++	path_put(&path);
++out:
++	free_page((unsigned long) kbuf);
++	return pathlen;
++}
++
++SYSCALL_DEFINE3(syscall_service_fchdir, unsigned int, fd, char __user *, buf, size_t, len)
++{
++	char *kbuf, *pathstr;
++	ssize_t pathlen;
++	struct file *file;
++	struct inode *inode;
++	int fput_needed;
++
++	kbuf = (char *) __get_free_page(GFP_KERNEL);
++	if (!kbuf)
++		return -ENOMEM;
++	pathlen = -EBADF;
++	file = fget_raw_light(fd, &fput_needed);
++	if (!file)
++		goto out;
++
++	inode = file->f_path.dentry->d_inode;
++
++	pathlen = -ENOTDIR;
++	if (!S_ISDIR(inode->i_mode))
++		goto out_putf;
++
++	pathlen = inode_permission(inode, MAY_EXEC | MAY_CHDIR);
++	if (!pathlen) {
++		pathstr = d_path(&file->f_path, kbuf, PAGE_SIZE);
++		pathlen = strlen(pathstr) + 1;
++		if ((size_t) pathlen > len) {
++			pathlen = -ENAMETOOLONG;
++			goto out_putf;
++		}
++		if (copy_to_user(buf, pathstr, pathlen)) {
++			pathlen = -EFAULT;
++			goto out_putf;
++		}
++		set_fs_pwd(current->fs, &file->f_path);
++	}
++out_putf:
++	fput_light(file, fput_needed);
++out:
++	free_page((unsigned long) kbuf);
++	return pathlen;
++}
++
+ SYSCALL_DEFINE1(chroot, const char __user *, filename)
+ {
+ 	struct path path;
+diff -urN linux-3.2.30/include/asm-generic/fcntl.h linux-3.2.30-new/include/asm-generic/fcntl.h
+--- linux-3.2.30/include/asm-generic/fcntl.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/asm-generic/fcntl.h	2013-09-23 20:33:39.470208204 -0400
+@@ -84,6 +84,10 @@
+ #define O_PATH		010000000
+ #endif
+ 
++#ifndef O_NOSIGNAL
++#define O_NOSIGNAL	020000000
++#endif
++
+ #ifndef O_NDELAY
+ #define O_NDELAY	O_NONBLOCK
+ #endif
+diff -urN linux-3.2.30/include/linux/cred.h linux-3.2.30-new/include/linux/cred.h
+--- linux-3.2.30/include/linux/cred.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/cred.h	2013-09-23 20:33:39.470208204 -0400
+@@ -3,6 +3,9 @@
+  * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
+  * Written by David Howells (dhowells@redhat.com)
+  *
++ * Modifications for VM-Syscalls
++ * Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public Licence
+  * as published by the Free Software Foundation; either version
+@@ -151,14 +154,35 @@
+ 	struct rcu_head	rcu;		/* RCU deletion hook */
+ };
+ 
++struct cred_move {
++	uid_t uid;
++	uid_t suid;
++	uid_t euid;
++	uid_t fsuid;
++	gid_t gid;
++	gid_t sgid;
++	gid_t egid;
++	gid_t fsgid;
++	kernel_cap_t cap_inheritable;
++	kernel_cap_t cap_permitted;
++	kernel_cap_t cap_effective;
++	kernel_cap_t cap_bset;
++	unsigned securebits;
++	unsigned ngroups;
++	gid_t groups[0];
++};
++
+ extern void __put_cred(struct cred *);
+ extern void exit_creds(struct task_struct *);
+ extern int copy_creds(struct task_struct *, unsigned long);
++extern int do_copy_creds(struct task_struct *, unsigned long, struct cred *);
+ extern const struct cred *get_task_cred(struct task_struct *);
+ extern struct cred *cred_alloc_blank(void);
+ extern struct cred *prepare_creds(void);
++extern struct cred *prepare_task_creds(struct task_struct *, struct cred_move *);
+ extern struct cred *prepare_exec_creds(void);
+ extern int commit_creds(struct cred *);
++extern int commit_task_creds(struct cred *, struct task_struct *);
+ extern void abort_creds(struct cred *);
+ extern const struct cred *override_creds(const struct cred *);
+ extern void revert_creds(const struct cred *);
+@@ -196,6 +220,11 @@
+ 	__validate_process_creds(current, __FILE__, __LINE__);	\
+ } while(0)
+ 
++#define validate_process_creds_task(tsk)				\
++do {								\
++	__validate_process_creds((tsk), __FILE__, __LINE__);	\
++} while(0)
++
+ extern void validate_creds_for_do_exit(struct task_struct *);
+ #else
+ static inline void validate_creds(const struct cred *cred)
+@@ -207,6 +236,9 @@
+ static inline void validate_process_creds(void)
+ {
+ }
++static inline void validate_process_creds_task(struct task_struct *tsk)
++{
++}
+ #endif
+ 
+ /**
+diff -urN linux-3.2.30/include/linux/_dcmpxchg.h linux-3.2.30-new/include/linux/_dcmpxchg.h
+--- linux-3.2.30/include/linux/_dcmpxchg.h	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.2.30-new/include/linux/_dcmpxchg.h	2013-09-23 20:33:39.470208204 -0400
+@@ -0,0 +1,30 @@
++#ifndef _SYSCALL_COMMON_DCMPXCHG_H
++#define _SYSCALL_COMMON_DCMPXCHG_H 1
++
++/* Double CAS implementation */
++# if defined(__x86_64__) || defined(__i386__)
++
++#  if defined(__x86_64__)
++#   define __DCMPXCHG "cmpxchg16b"
++#  else
++#   define __DCMPXCHG "cmpxchg8b"
++#  endif
++
++static inline bool dcmpxchg(size_t *addr, size_t prev_lo, size_t prev_hi,
++	size_t new_lo, size_t new_hi)
++{
++	bool result;
++	__asm__ __volatile__ ("lock " __DCMPXCHG " %0\n\t"
++						  "setz %b1"
++						  : "+m" (*addr), "=a" (result), "+d" (prev_hi)
++						  : "a" (prev_lo), "b" (new_lo), "c" (new_hi)
++						  : "cc"
++	);
++	return result;
++}
++
++#  undef __DCMPXCHG
++
++# endif
++
++#endif /* !_SYSCALL_COMMON_DCMPXCHG */
+diff -urN linux-3.2.30/include/linux/eventpoll.h linux-3.2.30-new/include/linux/eventpoll.h
+--- linux-3.2.30/include/linux/eventpoll.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/eventpoll.h	2013-09-23 20:33:39.470208204 -0400
+@@ -26,6 +26,9 @@
+ #define EPOLL_CTL_DEL 2
+ #define EPOLL_CTL_MOD 3
+ 
++/* A special value for SCLIB */
++#define EPOLLEFD (1 << 23)
++
+ /* Set the One Shot behaviour for the target file descriptor */
+ #define EPOLLONESHOT (1 << 30)
+ 
+@@ -54,6 +57,7 @@
+ /* Forward declarations to avoid compiler errors */
+ struct file;
+ 
++extern int do_epoll_ctl(int, int, int, struct epoll_event *);
+ 
+ #ifdef CONFIG_EPOLL
+ 
+diff -urN linux-3.2.30/include/linux/file.h linux-3.2.30-new/include/linux/file.h
+--- linux-3.2.30/include/linux/file.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/file.h	2013-09-23 20:33:39.470208204 -0400
+@@ -10,6 +10,7 @@
+ #include <linux/posix_types.h>
+ 
+ struct file;
++struct task_struct;
+ 
+ extern void fput(struct file *);
+ extern void drop_file_write_access(struct file *file);
+@@ -28,6 +29,7 @@
+ }
+ 
+ extern struct file *fget(unsigned int fd);
++extern struct file *fget_task(unsigned int fd, struct task_struct *task);
+ extern struct file *fget_light(unsigned int fd, int *fput_needed);
+ extern struct file *fget_raw(unsigned int fd);
+ extern struct file *fget_raw_light(unsigned int fd, int *fput_needed);
+diff -urN linux-3.2.30/include/linux/init_task.h linux-3.2.30-new/include/linux/init_task.h
+--- linux-3.2.30/include/linux/init_task.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/init_task.h	2013-09-23 20:33:39.474208205 -0400
+@@ -203,6 +203,8 @@
+ 		[PIDTYPE_SID]  = INIT_PID_LINK(PIDTYPE_SID),		\
+ 	},								\
+ 	.thread_group	= LIST_HEAD_INIT(tsk.thread_group),		\
++	.sfn_sleep	= NULL,									\
++	.sfn_wake		= NULL,									\
+ 	INIT_IDS							\
+ 	INIT_PERF_EVENTS(tsk)						\
+ 	INIT_TRACE_IRQFLAGS						\
+@@ -213,7 +215,6 @@
+ 	INIT_CPUSET_SEQ							\
+ }
+ 
+-
+ #define INIT_CPU_TIMERS(cpu_timers)					\
+ {									\
+ 	LIST_HEAD_INIT(cpu_timers[0]),					\
+diff -urN linux-3.2.30/include/linux/kthread.h linux-3.2.30-new/include/linux/kthread.h
+--- linux-3.2.30/include/linux/kthread.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/kthread.h	2013-09-23 20:33:39.474208205 -0400
+@@ -10,6 +10,11 @@
+ 					   int node,
+ 					   const char namefmt[], ...);
+ 
++struct task_struct *kthread_syscall_create(int (*threadfn)(void *data),
++					   void *data,
++					   int flags,
++					   const char namefmt[], ...);
++
+ #define kthread_create(threadfn, data, namefmt, arg...) \
+ 	kthread_create_on_node(threadfn, data, -1, namefmt, ##arg)
+ 
+@@ -34,6 +39,7 @@
+ 
+ void kthread_bind(struct task_struct *k, unsigned int cpu);
+ int kthread_stop(struct task_struct *k);
++int kthread_syscall_stop(struct task_struct *k);
+ int kthread_should_stop(void);
+ void *kthread_data(struct task_struct *k);
+ 
+diff -urN linux-3.2.30/include/linux/net.h linux-3.2.30-new/include/linux/net.h
+--- linux-3.2.30/include/linux/net.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/net.h	2013-09-23 20:33:39.474208205 -0400
+@@ -109,6 +109,7 @@
+ #ifndef SOCK_NONBLOCK
+ #define SOCK_NONBLOCK	O_NONBLOCK
+ #endif
++#define SOCK_NOSIGNAL	O_NOSIGNAL
+ 
+ #endif /* ARCH_HAS_SOCKET_TYPES */
+ 
+diff -urN linux-3.2.30/include/linux/sched.h linux-3.2.30-new/include/linux/sched.h
+--- linux-3.2.30/include/linux/sched.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/sched.h	2013-09-23 20:33:39.474208205 -0400
+@@ -1,3 +1,8 @@
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #ifndef _LINUX_SCHED_H
+ #define _LINUX_SCHED_H
+ 
+@@ -91,6 +96,8 @@
+ #include <linux/latencytop.h>
+ #include <linux/cred.h>
+ #include <linux/llist.h>
++#include <linux/semaphore.h>
++#include <linux/_syscall.h>
+ 
+ #include <asm/processor.h>
+ 
+@@ -360,6 +367,7 @@
+ extern signed long schedule_timeout_killable(signed long timeout);
+ extern signed long schedule_timeout_uninterruptible(signed long timeout);
+ asmlinkage void schedule(void);
++asmlinkage void schedule_nosfn(void);
+ extern int mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner);
+ 
+ struct nsproxy;
+@@ -1210,6 +1218,7 @@
+ };
+ 
+ struct rcu_node;
++struct syscall_queue;
+ 
+ enum perf_event_task_context {
+ 	perf_invalid_context = -1,
+@@ -1218,6 +1227,8 @@
+ 	perf_nr_task_contexts,
+ };
+ 
++typedef void (*task_sfn_t)(void);
++
+ struct task_struct {
+ 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
+ 	void *stack;
+@@ -1576,6 +1587,12 @@
+ #ifdef CONFIG_HAVE_HW_BREAKPOINT
+ 	atomic_t ptrace_bp_refcnt;
+ #endif
++	task_sfn_t sfn_sleep;
++	task_sfn_t sfn_wake;
++	struct page *rqueue_page;
++	struct syscall_queue *rqueue;
++	wait_queue_head_t rqueue_wq;
++	uint32_t rqueue_gref[SYSCALL_SYSIDS][SYSCALL_QUEUE_PAGES];
+ };
+ 
+ /* Future-safe accessor for struct task_struct's cpus_allowed. */
+diff -urN linux-3.2.30/include/linux/_syscall_defs.h linux-3.2.30-new/include/linux/_syscall_defs.h
+--- linux-3.2.30/include/linux/_syscall_defs.h	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.2.30-new/include/linux/_syscall_defs.h	2013-09-23 20:33:39.474208205 -0400
+@@ -0,0 +1,53 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2013 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_DEFS_H
++#define _SYSCALL_COMMON_DEFS_H 1
++
++typedef struct syscall_ptr {
++	size_t index; /* Must be first! */
++	size_t stamp;
++} __attribute__ ((aligned(sizeof(size_t) * 2))) syscall_ptr_t;
++
++#define SYSCALL_NULL_ENTRY			(size_t) (-1L)
++#define SYSCALL_ERROR_ENTRY			(size_t) (-2L)
++#define SYSCALL_REPEAT_ENTRY		(size_t) (-3L)
++
++#define VOLATILE_READ(x)		(*(volatile __typeof__(x) *) &(x))
++#define VOLATILE_READ_FAULT(x) ({		\
++	__typeof__(x) __r;					\
++	if (__get_user(__r, &(x)) != 0)		\
++		goto error_fault;				\
++	__r;								\
++})
++
++#define VOLATILE_READ_FAULT_PTR(x) ({				\
++	__typeof__(x) __r;								\
++	if (__get_user(__r.index, &(x).index) != 0)		\
++		goto error_fault;							\
++	if (__get_user(__r.stamp, &(x).stamp) != 0)		\
++		goto error_fault;							\
++	__r;											\
++})
++
++#endif /* !_SYSCALL_COMMON_DEFS_H */
+diff -urN linux-3.2.30/include/linux/_syscall.h linux-3.2.30-new/include/linux/_syscall.h
+--- linux-3.2.30/include/linux/_syscall.h	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.2.30-new/include/linux/_syscall.h	2013-09-23 20:33:39.474208205 -0400
+@@ -0,0 +1,243 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_SYSCALL_H
++#define _SYSCALL_COMMON_SYSCALL_H 1
++
++#include "_syscall_defs.h"
++
++/* Hypercall parameters */
++#define SYSCALL_SERVICE_PREPARE			0
++#define SYSCALL_SERVICE_CANCEL			1
++#define SYSCALL_SERVICE_CONNECT			2
++#define SYSCALL_SERVICE_DISCONNECT		3
++#define SYSCALL_SERVICE_CLEANUP			4
++#define SYSCALL_SERVICE_REGISTER		5
++#define SYSCALL_SERVICE_UNREGISTER		6
++
++/* Syscall service states */
++#define SYSCALL_STATE_TERMINATED		0
++#define SYSCALL_STATE_RUNNING			(unsigned long) (LONG_MIN)
++
++/* Main ring buffer requests */
++#define SYSCALL_ACTION_INIT				0
++#define SYSCALL_ACTION_ADD				1
++#define SYSCALL_ACTION_REMOVE			2
++#define SYSCALL_ACTION_EXPAND_MAP		3
++#define SYSCALL_ACTION_SHRINK_MAP		4
++
++#define SYSCALL_PREALLOC_PROCESSES		8
++
++#define SYSCALL_SYSID_NETWORK			0
++#define SYSCALL_SYSID_STORAGE			1
++#define SYSCALL_SYSIDS					2
++
++#define SYSCALL_QUEUE_ORDER				3
++#define SYSCALL_QUEUE_PAGES				(1U << SYSCALL_QUEUE_ORDER)
++#define SYSCALL_CALL_PAGES				8
++#define SYSCALL_PAGES					(SYSCALL_CALL_PAGES + 1)
++#define SYSCALL_DATA_SHARED_PAGES		8192
++#define SYSCALL_TOTAL_SHARED_PAGES		(SYSCALL_PAGES + SYSCALL_DATA_SHARED_PAGES)
++#define SYSCALL_MAX_EXPAND_MAP_GREFS		80
++#define SYSCALL_MAX_GROUPS					16
++#define SYSCALL_FDTABLE_PATH				"/tmp/sclib_"
++
++#define SYSCALL_IOCTL_MAGIC					0x81
++#define SYSCALL_DRIVER_IOCTL_REGISTER		_IO(SYSCALL_IOCTL_MAGIC, 0)
++#define SYSCALL_DRIVER_IOCTL_EXPAND_BUFFER	_IO(SYSCALL_IOCTL_MAGIC, 1)
++#define SYSCALL_DRIVER_IOCTL_SHRINK_BUFFER	_IO(SYSCALL_IOCTL_MAGIC, 2)
++#define SYSCALL_DRIVER_IOCTL_WAKE			_IO(SYSCALL_IOCTL_MAGIC, 3)
++#define SYSCALL_SERVICE_IOCTL_CONNECT		_IO(SYSCALL_IOCTL_MAGIC, 8)
++#define SYSCALL_SERVICE_IOCTL_DISCONNECT	_IO(SYSCALL_IOCTL_MAGIC, 9)
++#define SYSCALL_SERVICE_IOCTL_CLEANUP		_IO(SYSCALL_IOCTL_MAGIC, 10)
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct syscall_connect {
++	uint32_t	domid;
++	uint32_t	main_port;
++	uint32_t	ring_port;
++	uint32_t	disconnect_port;
++	uint32_t	wake_port;
++	uint32_t	main_gref;
++	uint32_t	front_ring_gref;
++	uint32_t	back_ring_gref;
++	uint32_t	wake_gref;
++} syscall_connect_t;
++
++//#define SYSCALL_DEBUG
++
++#ifdef __KERNEL__
++
++#include <xen/interface/io/ring.h>
++
++typedef struct syscall_prealloc {
++	uint32_t	id;
++	uint32_t	gref[SYSCALL_CALL_PAGES];
++} syscall_prealloc_t;
++
++typedef struct syscall_prealloc_process {
++	syscall_ptr_t alloc_top;
++	syscall_ptr_t free_top;
++	size_t next[SYSCALL_PREALLOC_PROCESSES];
++	syscall_prealloc_t entry[SYSCALL_PREALLOC_PROCESSES];
++} syscall_prealloc_process_t;
++
++struct sccom_request_add {
++	uint32_t	id;
++	uint32_t	ptgid;
++	uint32_t	gref[SYSCALL_QUEUE_PAGES];
++	struct cred_move	cm;
++	gid_t	_pad[SYSCALL_MAX_GROUPS];	/* Groups for credentials */
++};
++
++struct sccom_request_memory {
++	uint32_t	num;
++};
++
++struct sccom_response {
++	uint32_t	tgid;
++	uint32_t	num;
++	union {
++		syscall_prealloc_t	prealloc[SYSCALL_PREALLOC_PROCESSES];
++		uint32_t			grefs[SYSCALL_MAX_EXPAND_MAP_GREFS];
++	};
++};
++
++struct sccom_request {
++	int			id;
++	uint32_t	tgid;
++	union {
++		struct sccom_request_add	add;
++		struct sccom_request_memory	mem;
++	};
++};
++
++struct screq_response {
++	int			id;
++	uint32_t	tgid;
++	uint32_t	pid;
++};
++
++struct screq_request {
++	char		pad[0]; /* Just a stub */
++};
++
++#define RING_FULL_RSP(_r)	\
++	(RING_SIZE(_r) - ((_r)->rsp_prod_pvt - (_r)->sring->rsp_event) == 1)
++
++DEFINE_RING_TYPES(sccom, struct sccom_request, struct sccom_response);
++DEFINE_RING_TYPES(screq, struct screq_request, struct screq_response);
++
++#ifdef SYSCALL_DEBUG
++# define SYSCALL_TRACE(fmt, ...)	printk(KERN_INFO "[SC-CALL:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++#else
++# define SYSCALL_TRACE(fmt, ...)
++#endif
++
++#define SYSCALL_WARNING(fmt, ...)		printk(KERN_WARNING "[SC-WARNING:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++
++#define SYSCALL_ERROR(fmt, ...)		printk(KERN_ERR "[SC-ERROR:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++
++#endif /* __KERNEL__ */
++
++#define SYSCALL_REQUEST_FD			0x7FFFFFFF
++#define SYSCALL_REQUEST_NOTIFY		0x7FFFFFFF
++#define SYSCALL_REQUEST_SIGNAL(x)	((x) | 0x80000000)
++
++#define SYSCALL_ENTRY_RQUEUE		0x80U
++#define SYSCALL_ENTRY_DONE			0xFFU
++
++/* Double word definition */
++#if defined(__x86_64__)
++typedef __int128_t syscall_sdw_t;
++typedef __uint128_t syscall_udw_t;
++# define SYSCALL_INT_PTR(x)				((int *) (x))	/* Little Endian */
++#elif defined(__i386__)
++typedef int64_t syscall_sdw_t;
++typedef uint64_t syscall_udw_t;
++# define SYSCALL_INT_PTR(x)				((int *) (x))	/* Little Endian */
++#endif
++
++#define syscall_entry_result_lower(x)	((x)->args[0])
++#define syscall_entry_result_upper(x)	((x)->args[1])
++
++#define syscall_entry_result_sw(x)		((x)->args[0])
++#define syscall_entry_result_dw(x)	\
++	(((syscall_udw_t) (x)->args[1] << (sizeof(long) * 8)) | (x)->args[0])
++
++#define syscall_result_lower(x)			((unsigned long) (x))
++#define syscall_result_upper(x)			((unsigned long) ((syscall_udw_t) (x) >> (sizeof(long) * 8)))
++
++struct pthread;
++
++typedef struct syscall_entry {
++	unsigned char id;
++	unsigned char signal;
++	unsigned short seq_num;
++	unsigned int task_id;
++	struct pthread *pd;
++	unsigned long args[6];
++} syscall_entry_t;
++
++#define SYSCALL_MAX_PTHREADS	((SYSCALL_QUEUE_PAGES * PAGE_SIZE - 4 * sizeof(syscall_ptr_t) - 2 * sizeof(long)) / (sizeof(syscall_ptr_t) + sizeof(void *)))
++#define SYSCALL_MAX_RQUEUE_SIZE	(SYSCALL_MAX_PTHREADS * (sizeof(syscall_ptr_t) + sizeof(void *)) + 4 * sizeof(syscall_ptr_t) + 2 * sizeof(long))
++
++struct syscall_queue {
++	syscall_ptr_t alloc_head;
++	syscall_ptr_t alloc_tail;
++	syscall_ptr_t free_head;
++	syscall_ptr_t free_tail;
++	syscall_ptr_t next[SYSCALL_MAX_PTHREADS];
++	void *entries[SYSCALL_MAX_PTHREADS];
++	unsigned long waiters;
++	unsigned long nkthreads;
++	char _pad[SYSCALL_QUEUE_PAGES * PAGE_SIZE - SYSCALL_MAX_RQUEUE_SIZE];
++};
++
++#define SYSCALL_MAX_ENTRIES		((SYSCALL_CALL_PAGES * PAGE_SIZE - 2 * sizeof(syscall_ptr_t)) / (sizeof(syscall_entry_t) + sizeof(size_t)))
++#define SYSCALL_MAX_CALL_SIZE	(SYSCALL_MAX_ENTRIES * sizeof(syscall_entry_t) + 2 * sizeof(syscall_ptr_t) + SYSCALL_MAX_ENTRIES * sizeof(size_t))
++
++typedef struct syscall_page {
++	syscall_entry_t	entry[SYSCALL_MAX_ENTRIES];
++	syscall_ptr_t alloc_top;
++	syscall_ptr_t free_top;
++	size_t next[SYSCALL_MAX_ENTRIES];
++	char _pad[SYSCALL_CALL_PAGES * PAGE_SIZE - SYSCALL_MAX_CALL_SIZE];
++} syscall_page_t;
++
++#define SYSCALL_WAKE_REQUESTED		0x100000000ULL
++#define SYSCALL_WAKE_IN_PROGRESS	0x80000000U
++
++typedef struct syscall_wake_page {
++	volatile uint64_t running_threads;
++	char _pad[PAGE_SIZE - sizeof(uint64_t)];
++} syscall_wake_page_t;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* !_SYSCALL_COMMON_SYSCALL_H */
+diff -urN linux-3.2.30/include/linux/_syscall_queue.h linux-3.2.30-new/include/linux/_syscall_queue.h
+--- linux-3.2.30/include/linux/_syscall_queue.h	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.2.30-new/include/linux/_syscall_queue.h	2013-09-23 21:05:51.186288289 -0400
+@@ -0,0 +1,237 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2013 Ruslan Nikolaev
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_SYSCALL_QUEUE_H
++#define _SYSCALL_COMMON_SYSCALL_QUEUE_H 1
++
++#include "_dcmpxchg.h"
++#include "_syscall_defs.h"
++
++/* This implements FIFO queue. */
++static inline size_t syscall_queue_enqueue(syscall_ptr_t *next,
++	syscall_ptr_t *tail, size_t eidx, size_t max, bool mark)
++{
++	syscall_ptr_t last, succ, tmp;
++
++	/* Initialize new entry */
++	do {
++		succ = VOLATILE_READ(next[eidx]);
++	} while (!dcmpxchg(&next[eidx].index, succ.index, succ.stamp,
++		SYSCALL_NULL_ENTRY, succ.stamp + 1));
++
++	while (1) {
++		last = VOLATILE_READ(*tail);
++		if (unlikely(last.index >= max))
++			return SYSCALL_ERROR_ENTRY;
++		succ = VOLATILE_READ(next[last.index]);
++		tmp = VOLATILE_READ(*tail);
++		if (last.index != tmp.index || last.stamp != tmp.stamp)
++			continue;
++		if ((ssize_t) succ.index < 0) {
++			if (mark && succ.index != SYSCALL_NULL_ENTRY) {
++				if (dcmpxchg(&next[last.index].index, succ.index, succ.stamp,
++					succ.index + 1, succ.stamp + 1)) {
++					return SYSCALL_NULL_ENTRY;
++				}
++			} else if (dcmpxchg(&next[last.index].index, succ.index, succ.stamp,
++				eidx, succ.stamp + 1))
++			{
++				dcmpxchg(&tail->index, last.index, last.stamp,
++					eidx, last.stamp + 1);
++				return 0;
++			}
++		} else {
++			dcmpxchg(&tail->index, last.index, last.stamp, succ.index,
++				last.stamp + 1);
++		}
++	}
++}
++
++#define syscall_queue_enqueue_fault(next, tail, eidx, max, mark) ({	\
++	syscall_ptr_t *__next = (next), *__tail = (tail); \
++	size_t __ret, __eidx = (eidx), __max = (max); \
++	bool __mark = (mark), __dret; \
++	syscall_ptr_t __last, __succ, __tmp; \
++	do { \
++		__succ = VOLATILE_READ_FAULT_PTR(__next[__eidx]); \
++		if (__dcmpxchg_user(__dret, __succ.index, __succ.stamp, \
++			SYSCALL_NULL_ENTRY, __succ.stamp + 1, &__next[__eidx].index)) \
++			goto error_fault; \
++	} while (!__dret); \
++	while (1) { \
++		__last = VOLATILE_READ_FAULT_PTR(*__tail); \
++		if (unlikely(__last.index >= __max)) { \
++			__ret = SYSCALL_ERROR_ENTRY; \
++			break; \
++		} \
++		__succ = VOLATILE_READ_FAULT_PTR(__next[__last.index]); \
++		__tmp = VOLATILE_READ_FAULT_PTR(*__tail); \
++		if (__last.index != __tmp.index || __last.stamp != __tmp.stamp) \
++			continue; \
++		if ((ssize_t) __succ.index < 0) { \
++			if (__mark && __succ.index != SYSCALL_NULL_ENTRY) { \
++				if (__dcmpxchg_user(__dret, __succ.index, __succ.stamp, \
++					__succ.index + 1, __succ.stamp + 1, \
++					&__next[__last.index].index)) \
++					goto error_fault; \
++				if (__dret) { \
++					__ret = SYSCALL_NULL_ENTRY; \
++					break; \
++				} \
++			} else { \
++				if (__dcmpxchg_user(__dret, __succ.index, __succ.stamp, \
++					__eidx, __succ.stamp + 1, &__next[__last.index].index)) \
++					goto error_fault; \
++				if (__dret) { \
++					if (__dcmpxchg_user(__dret, __last.index, __last.stamp, \
++						__eidx, __last.stamp + 1, &__tail->index)) \
++						goto error_fault; \
++					__ret = 0; \
++					break; \
++				} \
++			} \
++		} else { \
++			if (__dcmpxchg_user(__dret, __last.index, __last.stamp, \
++				__succ.index, __last.stamp + 1, &__tail->index)) \
++				goto error_fault; \
++		} \
++	} \
++__ret; })
++
++#define syscall_queue_dequeue(next, entries, head, tail, result, max, mark) ({ \
++	syscall_ptr_t *__next, *__head, *__tail; \
++	syscall_ptr_t __first, __last, __succ, __tmp; \
++	size_t __eidx; \
++	__next = (next); \
++	__head = (head); \
++	__tail = (tail); \
++	while (1) { \
++		__first = VOLATILE_READ(*__head); \
++		__last = VOLATILE_READ(*__tail); \
++		if (unlikely(__first.index >= max)) { \
++			__eidx = SYSCALL_ERROR_ENTRY; \
++			break; \
++		} \
++		__succ = VOLATILE_READ(__next[__first.index]); \
++		__tmp = VOLATILE_READ(*__head); \
++		if (__first.index != __tmp.index || __first.stamp != __tmp.stamp) \
++			continue; \
++		if (__first.index == __last.index) { \
++			if ((ssize_t) __succ.index < 0) { \
++				if (mark) { \
++					if (!dcmpxchg(&__next[__first.index].index, __succ.index, __succ.stamp, __succ.index - 1, __succ.stamp + 1)) \
++						continue; \
++				} \
++				__eidx = SYSCALL_NULL_ENTRY; \
++				break; \
++			} \
++			dcmpxchg(&__tail->index, __last.index, __last.stamp, __succ.index, __last.stamp + 1); \
++		} else { \
++			if (unlikely(__succ.index >= max)) { \
++				__eidx = SYSCALL_ERROR_ENTRY; \
++				break; \
++			} \
++			*(result) = (entries)[__succ.index]; \
++			if (dcmpxchg(&__head->index, __first.index, __first.stamp, \
++				__succ.index, __first.stamp + 1)) { \
++				__eidx = __first.index; \
++				break; \
++			} \
++		} \
++	} \
++__eidx; })
++
++#define syscall_queue_dequeue_fault(next, entries, head, tail, result, max, mark) ({ \
++	syscall_ptr_t *__next, *__head, *__tail; \
++	syscall_ptr_t __first, __last, __succ, __tmp; \
++	size_t __eidx; \
++	bool __dret; \
++	__next = (next); \
++	__head = (head); \
++	__tail = (tail); \
++	while (1) { \
++		__first = VOLATILE_READ_FAULT_PTR(*__head); \
++		__last = VOLATILE_READ_FAULT_PTR(*__tail); \
++		if (unlikely(__first.index >= max)) { \
++			__eidx = SYSCALL_ERROR_ENTRY; \
++			break; \
++		} \
++		__succ = VOLATILE_READ_FAULT_PTR(__next[__first.index]); \
++		__tmp = VOLATILE_READ_FAULT_PTR(*__head); \
++		if (__first.index != __tmp.index || __first.stamp != __tmp.stamp) \
++			continue; \
++		if (__first.index == __last.index) { \
++			if ((ssize_t) __succ.index < 0) { \
++				if (mark) { \
++					if (__dcmpxchg_user(__dret, __succ.index, __succ.stamp, __succ.index - 1, __succ.stamp + 1, &__next[__first.index].index))	\
++						goto error_fault;	\
++					if (!__dret) \
++						continue; \
++				} \
++				__eidx = SYSCALL_NULL_ENTRY; \
++				break; \
++			} \
++			if (__dcmpxchg_user(__dret, __last.index, __last.stamp, __succ.index, __last.stamp + 1, &__tail->index)) \
++				goto error_fault; \
++		} else { \
++			if (unlikely(__succ.index >= max)) { \
++				__eidx = SYSCALL_ERROR_ENTRY; \
++				break; \
++			} \
++			if (__get_user(*(result), &(entries)[__succ.index])) \
++				goto error_fault; \
++			if (__dcmpxchg_user(__dret, __first.index, __first.stamp, \
++				__succ.index, __first.stamp + 1, &__head->index)) \
++					goto error_fault; \
++			if (__dret) { \
++				__eidx = __first.index; \
++				break; \
++			} \
++		} \
++	} \
++__eidx; })
++
++static inline size_t syscall_queue_check(syscall_ptr_t *next,
++	syscall_ptr_t *head, syscall_ptr_t *tail, size_t max)
++{
++	syscall_ptr_t first, last, succ, tmp;
++
++	while (1) {
++		first = VOLATILE_READ(*head);
++		last = VOLATILE_READ(*tail);
++		if (unlikely(first.index >= max))
++			return SYSCALL_ERROR_ENTRY;
++		succ = VOLATILE_READ(next[first.index]);
++		tmp = VOLATILE_READ(*head);
++		if (tmp.index != first.index || tmp.stamp != first.stamp)
++			continue;
++		if (first.index != last.index)
++			return 0;
++		if ((ssize_t) succ.index < 0)
++			return SYSCALL_NULL_ENTRY;
++		dcmpxchg(&tail->index, last.index, last.stamp, succ.index,
++			last.stamp + 1);
++	}
++}
++
++#endif /* !_SYSCALL_COMMON_SYSCALL_QUEUE_H */
+diff -urN linux-3.2.30/include/linux/syscall_service.h linux-3.2.30-new/include/linux/syscall_service.h
+--- linux-3.2.30/include/linux/syscall_service.h	1969-12-31 19:00:00.000000000 -0500
++++ linux-3.2.30-new/include/linux/syscall_service.h	2013-09-23 20:33:39.474208205 -0400
+@@ -0,0 +1,42 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012-2013 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _LINUX_SYSCALL_SERVICE_H
++#define _LINUX_SYSCALL_SERVICE_H
++
++#include <linux/types.h>
++#include <linux/sched.h>
++
++struct syscall_efd {
++	uint64_t efd_num;
++	int n;
++	int efd[SYSCALL_SYSIDS+1];
++};
++
++typedef void (*syscall_notify_t) (int, int, uint32_t, uint32_t);
++
++extern syscall_notify_t syscall_notify;
++extern void syscall_notify_stub(int sysid, int id, uint32_t tgid, uint32_t tid);
++
++#endif
++
+diff -urN linux-3.2.30/include/linux/syscalls.h linux-3.2.30-new/include/linux/syscalls.h
+--- linux-3.2.30/include/linux/syscalls.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/syscalls.h	2013-09-23 20:33:39.474208205 -0400
+@@ -63,6 +63,9 @@
+ struct old_linux_dirent;
+ struct perf_event_attr;
+ struct file_handle;
++struct syscall_efd;
++struct syscall_entry;
++struct syscall_queue;
+ 
+ #include <linux/types.h>
+ #include <linux/aio_abi.h>
+@@ -857,4 +860,18 @@
+ 				      unsigned long riovcnt,
+ 				      unsigned long flags);
+ 
++asmlinkage long sys_rqueue_wait_notify(int sysid, unsigned char id, struct syscall_entry __user * entry, void __user ** ptr);
++asmlinkage long sys_syscall_service_select(struct syscall_efd __user *ptr,
++	fd_set __user *inp, fd_set __user *outp, fd_set __user *exp,
++	struct timeval __user *tvp);
++asmlinkage long sys_syscall_service_poll(struct pollfd __user *ufds,
++	struct syscall_efd __user *ptr, long timeout);
++asmlinkage long sys_syscall_service_epoll_wait(struct syscall_efd __user *ptr,
++	struct epoll_event __user *events, int maxevents, int timeout);
++asmlinkage long sys_syscall_service_notify(struct syscall_efd __user *ptr);
++asmlinkage long sys_syscall_service_chdir(const char __user *filename, char __user *buf, size_t len);
++asmlinkage long sys_syscall_service_fchdir(unsigned int fd, char __user *buf, size_t len);
++asmlinkage long sys_rqueue_wake(unsigned long nr);
++asmlinkage long sys_rqueue_wait(void __user **ptr);
++
+ #endif
+diff -urN linux-3.2.30/include/linux/vmalloc.h linux-3.2.30-new/include/linux/vmalloc.h
+--- linux-3.2.30/include/linux/vmalloc.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/vmalloc.h	2013-09-23 20:33:39.478208207 -0400
+@@ -99,6 +99,8 @@
+ #ifdef CONFIG_MMU
+ extern int map_kernel_range_noflush(unsigned long start, unsigned long size,
+ 				    pgprot_t prot, struct page **pages);
++extern int map_kernel_range(unsigned long addr, unsigned long size,
++			    pgprot_t prot, struct page **pages);
+ extern void unmap_kernel_range_noflush(unsigned long addr, unsigned long size);
+ extern void unmap_kernel_range(unsigned long addr, unsigned long size);
+ #else
+@@ -108,6 +110,12 @@
+ {
+ 	return size >> PAGE_SHIFT;
+ }
++static inline int
++map_kernel_range(unsigned long addr, unsigned long size,
++		 pgprot_t prot, struct page **pages)
++{
++	return addr >> PAGE_SHIFT;
++}
+ static inline void
+ unmap_kernel_range_noflush(unsigned long addr, unsigned long size)
+ {
+diff -urN linux-3.2.30/include/linux/wait.h linux-3.2.30-new/include/linux/wait.h
+--- linux-3.2.30/include/linux/wait.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/linux/wait.h	2013-09-23 20:33:39.478208207 -0400
+@@ -1,3 +1,8 @@
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #ifndef _LINUX_WAIT_H
+ #define _LINUX_WAIT_H
+ 
+@@ -202,6 +207,19 @@
+ 	finish_wait(&wq, &__wait);					\
+ } while (0)
+ 
++#define __wait_event_nosfn(wq, condition) 					\
++do {									\
++	DEFINE_WAIT(__wait);						\
++									\
++	for (;;) {							\
++		prepare_to_wait(&wq, &__wait, TASK_UNINTERRUPTIBLE);	\
++		if (condition)						\
++			break;						\
++		schedule_nosfn();						\
++	}								\
++	finish_wait(&wq, &__wait);					\
++} while (0)
++
+ /**
+  * wait_event - sleep until a condition gets true
+  * @wq: the waitqueue to wait on
+@@ -221,6 +239,13 @@
+ 	__wait_event(wq, condition);					\
+ } while (0)
+ 
++#define wait_event_nosfn(wq, condition) 					\
++do {									\
++	if (condition)	 						\
++		break;							\
++	__wait_event_nosfn(wq, condition);					\
++} while (0)
++
+ #define __wait_event_timeout(wq, condition, ret)			\
+ do {									\
+ 	DEFINE_WAIT(__wait);						\
+diff -urN linux-3.2.30/include/xen/interface/xen.h linux-3.2.30-new/include/xen/interface/xen.h
+--- linux-3.2.30/include/xen/interface/xen.h	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/include/xen/interface/xen.h	2013-09-23 20:33:39.478208207 -0400
+@@ -59,6 +59,7 @@
+ #define __HYPERVISOR_physdev_op           33
+ #define __HYPERVISOR_hvm_op               34
+ #define __HYPERVISOR_tmem_op              38
++#define __HYPERVISOR_syscall_service_op   40
+ 
+ /* Architecture-specific hypercall definitions. */
+ #define __HYPERVISOR_arch_0               48
+diff -urN linux-3.2.30/kernel/cred.c linux-3.2.30-new/kernel/cred.c
+--- linux-3.2.30/kernel/cred.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/cred.c	2013-09-23 20:33:39.478208207 -0400
+@@ -3,6 +3,9 @@
+  * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
+  * Written by David Howells (dhowells@redhat.com)
+  *
++ * Modifications for VM-Syscalls
++ * Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
+  * This program is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public Licence
+  * as published by the Free Software Foundation; either version
+@@ -205,6 +208,7 @@
+ 		put_cred(cred);
+ 	}
+ }
++EXPORT_SYMBOL_GPL(exit_creds);
+ 
+ /**
+  * get_task_cred - Get another task's objective credentials
+@@ -283,11 +287,18 @@
+  */
+ struct cred *prepare_creds(void)
+ {
+-	struct task_struct *task = current;
++	return prepare_task_creds(current, NULL);
++}
++EXPORT_SYMBOL(prepare_creds);
++
++struct cred *prepare_task_creds(struct task_struct *task, struct cred_move *cm)
++{
+ 	const struct cred *old;
+ 	struct cred *new;
++	struct group_info *group_info;
++	size_t ngroups, num, i;
+ 
+-	validate_process_creds();
++	validate_process_creds_task(task);
+ 
+ 	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+ 	if (!new)
+@@ -298,10 +309,43 @@
+ 	old = task->cred;
+ 	memcpy(new, old, sizeof(struct cred));
+ 
++	if (!cm) {
++		get_group_info(new->group_info);
++		get_uid(new->user);
++	} else {
++		new->user = alloc_uid(old->user_ns, cm->uid);
++		if (!new->user)
++			goto error_user;
++		ngroups = cm->ngroups;
++		group_info = groups_alloc(ngroups);
++		if (!group_info)
++			goto error_group;
++		ngroups *= sizeof(gid_t);
++		num = NGROUPS_PER_BLOCK * sizeof(gid_t);
++		for (i = 0; ngroups != 0; i++) {
++			if (num > ngroups)
++				num = ngroups;
++			memcpy(group_info->blocks[i], cm->groups + i * NGROUPS_PER_BLOCK, num);
++			ngroups -= num;
++		}
++		new->group_info = group_info;
++		new->uid = cm->uid;
++		new->suid = cm->suid;
++		new->euid = cm->euid;
++		new->fsuid = cm->fsuid;
++		new->gid = cm->gid;
++		new->sgid = cm->sgid;
++		new->egid = cm->egid;
++		new->fsgid = cm->fsgid;
++		new->securebits = cm->securebits;
++		new->cap_inheritable = cm->cap_inheritable;
++		new->cap_permitted = cm->cap_permitted;
++		new->cap_effective = cm->cap_effective;
++		new->cap_bset = cm->cap_bset;
++	}
++
+ 	atomic_set(&new->usage, 1);
+ 	set_cred_subscribers(new, 0);
+-	get_group_info(new->group_info);
+-	get_uid(new->user);
+ 
+ #ifdef CONFIG_KEYS
+ 	key_get(new->thread_keyring);
+@@ -321,8 +365,14 @@
+ error:
+ 	abort_creds(new);
+ 	return NULL;
++
++error_group:
++	free_uid(new->user);
++error_user:
++	kmem_cache_free(cred_jar, new);
++	return NULL;
+ }
+-EXPORT_SYMBOL(prepare_creds);
++EXPORT_SYMBOL(prepare_task_creds);
+ 
+ /*
+  * Prepare credentials for current to perform an execve()
+@@ -379,11 +429,7 @@
+  */
+ int copy_creds(struct task_struct *p, unsigned long clone_flags)
+ {
+-#ifdef CONFIG_KEYS
+-	struct thread_group_cred *tgcred;
+-#endif
+ 	struct cred *new;
+-	int ret;
+ 
+ 	p->replacement_session_keyring = NULL;
+ 
+@@ -393,6 +439,24 @@
+ #endif
+ 		clone_flags & CLONE_THREAD
+ 	    ) {
++		new = NULL;
++	} else {
++		new = prepare_creds();
++		if (!new)
++			return -ENOMEM;
++	}
++	return do_copy_creds(p, clone_flags, new);
++}
++EXPORT_SYMBOL_GPL(copy_creds);
++
++int do_copy_creds(struct task_struct *p, unsigned long clone_flags, struct cred *new)
++{
++#ifdef CONFIG_KEYS
++	struct thread_group_cred *tgcred;
++#endif
++	int ret;
++
++	if (new == NULL) {
+ 		p->real_cred = get_cred(p->cred);
+ 		get_cred(p->cred);
+ 		alter_cred_subscribers(p->cred, 2);
+@@ -403,10 +467,6 @@
+ 		return 0;
+ 	}
+ 
+-	new = prepare_creds();
+-	if (!new)
+-		return -ENOMEM;
+-
+ 	if (clone_flags & CLONE_NEWUSER) {
+ 		ret = create_user_ns(new);
+ 		if (ret < 0)
+@@ -457,6 +517,7 @@
+ 	put_cred(new);
+ 	return ret;
+ }
++EXPORT_SYMBOL_GPL(do_copy_creds);
+ 
+ /**
+  * commit_creds - Install new credentials upon the current task
+@@ -474,7 +535,12 @@
+  */
+ int commit_creds(struct cred *new)
+ {
+-	struct task_struct *task = current;
++	return commit_task_creds(new, current);
++}
++EXPORT_SYMBOL(commit_creds);
++
++int commit_task_creds(struct cred *new, struct task_struct *task)
++{
+ 	const struct cred *old = task->real_cred;
+ 
+ 	kdebug("commit_creds(%p{%d,%d})", new,
+@@ -540,7 +606,7 @@
+ 	put_cred(old);
+ 	return 0;
+ }
+-EXPORT_SYMBOL(commit_creds);
++EXPORT_SYMBOL(commit_task_creds);
+ 
+ /**
+  * abort_creds - Discard a set of credentials and unlock the current task
+diff -urN linux-3.2.30/kernel/exit.c linux-3.2.30-new/kernel/exit.c
+--- linux-3.2.30/kernel/exit.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/exit.c	2013-09-23 20:33:39.478208207 -0400
+@@ -521,6 +521,8 @@
+ 	}
+ }
+ 
++EXPORT_SYMBOL_GPL(put_files_struct);
++
+ void reset_files_struct(struct files_struct *files)
+ {
+ 	struct task_struct *tsk = current;
+diff -urN linux-3.2.30/kernel/fork.c linux-3.2.30-new/kernel/fork.c
+--- linux-3.2.30/kernel/fork.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/fork.c	2013-09-23 20:33:39.478208207 -0400
+@@ -5,6 +5,11 @@
+  */
+ 
+ /*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
++/*
+  *  'fork.c' contains the help-routines for the 'fork' system call
+  * (see also entry.S and others).
+  * Fork is rather simple, once you get the hang of it, but the memory
+@@ -68,6 +73,8 @@
+ #include <linux/oom.h>
+ #include <linux/khugepaged.h>
+ #include <linux/signalfd.h>
++#include <linux/gfp.h>
++#include <linux/_syscall.h>
+ 
+ #include <asm/pgtable.h>
+ #include <asm/pgalloc.h>
+@@ -195,6 +202,8 @@
+ 	delayacct_tsk_free(tsk);
+ 	put_signal_struct(tsk->signal);
+ 
++	__free_pages(tsk->rqueue_page, SYSCALL_QUEUE_ORDER);
++
+ 	if (!profile_handoff_task(tsk))
+ 		free_task(tsk);
+ }
+@@ -1129,6 +1138,14 @@
+ 	if (!try_module_get(task_thread_info(p)->exec_domain->module))
+ 		goto bad_fork_cleanup_count;
+ 
++	p->rqueue_page = alloc_pages(GFP_KERNEL | __GFP_ZERO, SYSCALL_QUEUE_ORDER);
++	if (!p->rqueue_page)
++		goto bad_fork_cleanup_count;
++	p->rqueue = (struct syscall_queue *) pfn_to_kaddr(page_to_pfn(p->rqueue_page));
++	init_waitqueue_head(&p->rqueue_wq);
++	p->sfn_sleep = NULL;
++	p->sfn_wake = NULL;
++
+ 	p->did_exec = 0;
+ 	delayacct_tsk_init(p);	/* Must remain after dup_task_struct() */
+ 	copy_flags(clone_flags, p);
+@@ -1422,6 +1439,7 @@
+ 	cgroup_exit(p, cgroup_callbacks_done);
+ 	delayacct_tsk_free(p);
+ 	module_put(task_thread_info(p)->exec_domain->module);
++	__free_pages(p->rqueue_page, SYSCALL_QUEUE_ORDER);
+ bad_fork_cleanup_count:
+ 	atomic_dec(&p->cred->user->processes);
+ 	exit_creds(p);
+diff -urN linux-3.2.30/kernel/kthread.c linux-3.2.30-new/kernel/kthread.c
+--- linux-3.2.30/kernel/kthread.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/kthread.c	2013-09-23 20:33:39.478208207 -0400
+@@ -1,6 +1,9 @@
+ /* Kernel thread helper functions.
+  *   Copyright (C) 2004 IBM Corporation, Rusty Russell.
+  *
++ *   Modifications for VM-Syscalls
++ *   Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
+  * Creation is done via kthreadd, so that we get a clean environment
+  * even if we're invoked from userspace (think modprobe, hotplug cpu,
+  * etc.).
+@@ -185,6 +188,49 @@
+ }
+ EXPORT_SYMBOL(kthread_create_on_node);
+ 
++/* A special version for syscall kernel threads (based on the above version) */
++struct task_struct *kthread_syscall_create(int (*threadfn)(void *data),
++						void *data,
++						int flags,
++						const char namefmt[],
++						...)
++{
++	struct kthread_create_info create;
++	int pid;
++
++	create.threadfn = threadfn;
++	create.data = data;
++	create.node = -1;
++	init_completion(&create.done);
++
++	/* We want our own signal handler (we take no signals by default). */
++	pid = kernel_thread(kthread, &create, flags);
++	if (pid < 0) {
++		create.result = ERR_PTR(pid);
++		complete(&create.done);
++	}
++
++	wait_for_completion(&create.done);
++
++	if (!IS_ERR(create.result)) {
++		static const struct sched_param param = { .sched_priority = 0 };
++		va_list args;
++
++		va_start(args, namefmt);
++		vsnprintf(create.result->comm, sizeof(create.result->comm),
++			  namefmt, args);
++		va_end(args);
++		/*
++		 * root may have changed our (kthreadd's) priority or CPU mask.
++		 * The kernel thread should not inherit these properties.
++		 */
++		sched_setscheduler_nocheck(create.result, SCHED_NORMAL, &param);
++		set_cpus_allowed_ptr(create.result, cpu_all_mask);
++	}
++	return create.result;
++}
++EXPORT_SYMBOL(kthread_syscall_create);
++
+ /**
+  * kthread_bind - bind a just-created kthread to a cpu.
+  * @p: thread created by kthread_create().
+@@ -247,6 +293,35 @@
+ }
+ EXPORT_SYMBOL(kthread_stop);
+ 
++/* A special version for syscall kernel threads (based on the above version) */
++int kthread_syscall_stop(struct task_struct *k)
++{
++	struct kthread *kthread;
++	unsigned long flags;
++	int ret;
++
++	trace_sched_kthread_stop(k);
++	get_task_struct(k);
++
++	kthread = to_kthread(k);
++	barrier(); /* it might have exited */
++	if (k->vfork_done != NULL) {
++		spin_lock_irqsave(&k->sighand->siglock, flags);
++		kthread->should_stop = 1; smp_mb();
++		set_tsk_thread_flag(k, TIF_SIGPENDING);
++		spin_unlock_irqrestore(&k->sighand->siglock, flags);
++		wake_up_process(k);
++		wait_for_completion(&kthread->exited);
++	}
++	ret = k->exit_code;
++
++	put_task_struct(k);
++	trace_sched_kthread_stop_ret(ret);
++
++	return ret;
++}
++EXPORT_SYMBOL(kthread_syscall_stop);
++
+ int kthreadd(void *unused)
+ {
+ 	struct task_struct *tsk = current;
+diff -urN linux-3.2.30/kernel/sched.c linux-3.2.30-new/kernel/sched.c
+--- linux-3.2.30/kernel/sched.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/sched.c	2013-09-23 20:33:39.482208208 -0400
+@@ -26,6 +26,11 @@
+  *              Thomas Gleixner, Mike Kravetz
+  */
+ 
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #include <linux/mm.h>
+ #include <linux/module.h>
+ #include <linux/nmi.h>
+@@ -4678,12 +4683,31 @@
+ asmlinkage void __sched schedule(void)
+ {
+ 	struct task_struct *tsk = current;
++	int slept = 0;
++
++	if (tsk->state && tsk->sfn_sleep) {
++		tsk->sfn_sleep();
++		slept = 1;
++	}
+ 
+ 	sched_submit_work(tsk);
+ 	__schedule();
++
++	if (slept && tsk->sfn_wake) {
++		tsk->sfn_wake();
++	}
+ }
+ EXPORT_SYMBOL(schedule);
+ 
++asmlinkage void __sched schedule_nosfn(void)
++{
++	struct task_struct *tsk = current;
++
++	sched_submit_work(tsk);
++	__schedule();
++}
++EXPORT_SYMBOL(schedule_nosfn);
++
+ #ifdef CONFIG_MUTEX_SPIN_ON_OWNER
+ 
+ static inline bool owner_running(struct mutex *lock, struct task_struct *owner)
+diff -urN linux-3.2.30/kernel/signal.c linux-3.2.30-new/kernel/signal.c
+--- linux-3.2.30/kernel/signal.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/signal.c	2013-09-23 20:33:39.482208208 -0400
+@@ -207,6 +207,8 @@
+ 	return sig;
+ }
+ 
++EXPORT_SYMBOL_GPL(next_signal);
++
+ static inline void print_dropped_signal(int sig)
+ {
+ 	static DEFINE_RATELIMIT_STATE(ratelimit_state, 5 * HZ, 10);
+@@ -696,6 +698,8 @@
+ 		kick_process(t);
+ }
+ 
++EXPORT_SYMBOL_GPL(signal_wake_up);
++
+ /*
+  * Remove signals in mask from the pending set and queue.
+  * Returns 1 if any signals were found.
+diff -urN linux-3.2.30/kernel/user.c linux-3.2.30-new/kernel/user.c
+--- linux-3.2.30/kernel/user.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/kernel/user.c	2013-09-23 20:33:39.482208208 -0400
+@@ -121,6 +121,7 @@
+ 	spin_unlock_irqrestore(&uidhash_lock, flags);
+ 	return ret;
+ }
++EXPORT_SYMBOL_GPL(find_user);
+ 
+ void free_uid(struct user_struct *up)
+ {
+@@ -135,6 +136,7 @@
+ 	else
+ 		local_irq_restore(flags);
+ }
++EXPORT_SYMBOL_GPL(free_uid);
+ 
+ struct user_struct *alloc_uid(struct user_namespace *ns, uid_t uid)
+ {
+@@ -178,6 +180,7 @@
+ out_unlock:
+ 	return NULL;
+ }
++EXPORT_SYMBOL_GPL(alloc_uid);
+ 
+ static int __init uid_cache_init(void)
+ {
+diff -urN linux-3.2.30/mm/vmalloc.c linux-3.2.30-new/mm/vmalloc.c
+--- linux-3.2.30/mm/vmalloc.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/mm/vmalloc.c	2013-09-23 20:33:39.482208208 -0400
+@@ -1196,6 +1196,7 @@
+ {
+ 	return vmap_page_range_noflush(addr, addr + size, prot, pages);
+ }
++EXPORT_SYMBOL_GPL(map_kernel_range_noflush);
+ 
+ /**
+  * unmap_kernel_range_noflush - unmap kernel VM area
+@@ -1233,6 +1234,7 @@
+ 	vunmap_page_range(addr, end);
+ 	flush_tlb_kernel_range(addr, end);
+ }
++EXPORT_SYMBOL_GPL(unmap_kernel_range);
+ 
+ int map_vm_area(struct vm_struct *area, pgprot_t prot, struct page ***pages)
+ {
+@@ -1250,6 +1252,12 @@
+ }
+ EXPORT_SYMBOL_GPL(map_vm_area);
+ 
++int map_kernel_range(unsigned long addr, unsigned long size, pgprot_t prot, struct page **pages)
++{
++	return vmap_page_range(addr, addr + size, prot, pages);
++}
++EXPORT_SYMBOL_GPL(map_kernel_range);
++
+ /*** Old vmalloc interfaces ***/
+ DEFINE_RWLOCK(vmlist_lock);
+ struct vm_struct *vmlist;
+diff -urN linux-3.2.30/net/socket.c linux-3.2.30-new/net/socket.c
+--- linux-3.2.30/net/socket.c	2012-09-19 10:05:26.000000000 -0400
++++ linux-3.2.30-new/net/socket.c	2013-09-23 20:33:39.482208208 -0400
+@@ -58,6 +58,11 @@
+  *	Based upon Swansea University Computer Society NET3.039
+  */
+ 
++/*
++ *	Modifications for VM-Syscalls
++ *	Copyright (C) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ */
++
+ #include <linux/mm.h>
+ #include <linux/socket.h>
+ #include <linux/file.h>
+@@ -791,9 +796,12 @@
+ 
+ 	sock = file->private_data;
+ 
+-	flags = (file->f_flags & O_NONBLOCK) ? MSG_DONTWAIT : 0;
+ 	/* more is a combination of MSG_MORE and MSG_SENDPAGE_NOTLAST */
+-	flags |= more;
++	flags = more;
++	if (file->f_flags & O_NONBLOCK)
++		flags |= MSG_DONTWAIT;
++	if (file->f_flags & O_NOSIGNAL)
++		flags |= MSG_NOSIGNAL;
+ 
+ 	return kernel_sendpage(sock, page, offset, size, flags);
+ }
+@@ -845,6 +853,8 @@
+ 	msg->msg_iov = (struct iovec *)iov;
+ 	msg->msg_iovlen = nr_segs;
+ 	msg->msg_flags = (file->f_flags & O_NONBLOCK) ? MSG_DONTWAIT : 0;
++	if (file->f_flags & O_NOSIGNAL)
++		msg->msg_flags |= MSG_NOSIGNAL;
+ 
+ 	return __sock_recvmsg(iocb, sock, msg, size, msg->msg_flags);
+ }
+@@ -885,6 +895,8 @@
+ 	msg->msg_iov = (struct iovec *)iov;
+ 	msg->msg_iovlen = nr_segs;
+ 	msg->msg_flags = (file->f_flags & O_NONBLOCK) ? MSG_DONTWAIT : 0;
++	if (file->f_flags & O_NOSIGNAL)
++		msg->msg_flags |= MSG_NOSIGNAL;
+ 	if (sock->type == SOCK_SEQPACKET)
+ 		msg->msg_flags |= MSG_EOR;
+ 
+@@ -1310,9 +1322,10 @@
+ 	BUILD_BUG_ON((SOCK_MAX | SOCK_TYPE_MASK) != SOCK_TYPE_MASK);
+ 	BUILD_BUG_ON(SOCK_CLOEXEC & SOCK_TYPE_MASK);
+ 	BUILD_BUG_ON(SOCK_NONBLOCK & SOCK_TYPE_MASK);
++	BUILD_BUG_ON(SOCK_NOSIGNAL & SOCK_TYPE_MASK);
+ 
+ 	flags = type & ~SOCK_TYPE_MASK;
+-	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
++	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK | SOCK_NOSIGNAL))
+ 		return -EINVAL;
+ 	type &= SOCK_TYPE_MASK;
+ 
+@@ -1349,7 +1362,7 @@
+ 	int flags;
+ 
+ 	flags = type & ~SOCK_TYPE_MASK;
+-	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
++	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK | SOCK_NOSIGNAL))
+ 		return -EINVAL;
+ 	type &= SOCK_TYPE_MASK;
+ 
+@@ -1491,7 +1504,7 @@
+ 	int err, len, newfd, fput_needed;
+ 	struct sockaddr_storage address;
+ 
+-	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
++	if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK | SOCK_NOSIGNAL))
+ 		return -EINVAL;
+ 
+ 	if (SOCK_NONBLOCK != O_NONBLOCK && (flags & SOCK_NONBLOCK))
+@@ -1704,6 +1717,8 @@
+ 	}
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		flags |= MSG_DONTWAIT;
++	if (sock->file->f_flags & O_NOSIGNAL)
++		flags |= MSG_NOSIGNAL;
+ 	msg.msg_flags = flags;
+ 	err = sock_sendmsg(sock, &msg, len);
+ 
+@@ -1756,6 +1771,8 @@
+ 	msg.msg_namelen = sizeof(address);
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		flags |= MSG_DONTWAIT;
++	if (sock->file->f_flags & O_NOSIGNAL)
++		flags |= MSG_NOSIGNAL;
+ 	err = sock_recvmsg(sock, &msg, size, flags);
+ 
+ 	if (err >= 0 && addr != NULL) {
+@@ -1959,6 +1976,8 @@
+ 
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		msg_sys->msg_flags |= MSG_DONTWAIT;
++	if (sock->file->f_flags & O_NOSIGNAL)
++		msg_sys->msg_flags |= MSG_NOSIGNAL;
+ 	/*
+ 	 * If this is sendmmsg() and current destination address is same as
+ 	 * previously succeeded address, omit asking LSM's decision.
+@@ -2139,6 +2158,8 @@
+ 
+ 	if (sock->file->f_flags & O_NONBLOCK)
+ 		flags |= MSG_DONTWAIT;
++	if (sock->file->f_flags & O_NOSIGNAL)
++		flags |= MSG_NOSIGNAL;
+ 	err = (nosec ? sock_recvmsg_nosec : sock_recvmsg)(sock, msg_sys,
+ 							  total_len, flags);
+ 	if (err < 0)

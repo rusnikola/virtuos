@@ -1,0 +1,2471 @@
+diff -urN libaio-0.3.109/src/_dcmpxchg.h libaio-0.3.109-new/src/_dcmpxchg.h
+--- libaio-0.3.109/src/_dcmpxchg.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/_dcmpxchg.h	2013-09-23 23:39:33.665197166 -0400
+@@ -0,0 +1,30 @@
++#ifndef _SYSCALL_COMMON_DCMPXCHG_H
++#define _SYSCALL_COMMON_DCMPXCHG_H 1
++
++/* Double CAS implementation */
++# if defined(__x86_64__) || defined(__i386__)
++
++#  if defined(__x86_64__)
++#   define __DCMPXCHG "cmpxchg16b"
++#  else
++#   define __DCMPXCHG "cmpxchg8b"
++#  endif
++
++static inline bool dcmpxchg(size_t *addr, size_t prev_lo, size_t prev_hi,
++	size_t new_lo, size_t new_hi)
++{
++	bool result;
++	__asm__ __volatile__ ("lock " __DCMPXCHG " %0\n\t"
++						  "setz %b1"
++						  : "+m" (*addr), "=a" (result), "+d" (prev_hi)
++						  : "a" (prev_lo), "b" (new_lo), "c" (new_hi)
++						  : "cc"
++	);
++	return result;
++}
++
++#  undef __DCMPXCHG
++
++# endif
++
++#endif /* !_SYSCALL_COMMON_DCMPXCHG */
+diff -urN libaio-0.3.109/src/internal-syscall-x86_64.h libaio-0.3.109-new/src/internal-syscall-x86_64.h
+--- libaio-0.3.109/src/internal-syscall-x86_64.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/internal-syscall-x86_64.h	2013-09-23 23:39:33.665197166 -0400
+@@ -0,0 +1,154 @@
++/* Taken from uClibc: libc/sysdeps/linux/x86_64/bits/syscalls.h
++   and libc/sysdeps/linux/common/bits/syscalls-common.h 
++   Original license conditions apply. */
++
++#ifndef _BITS_SYSCALLS_H
++#define _BITS_SYSCALLS_H
++#ifndef _SYSCALL_H
++# error "Never use <bits/syscalls.h> directly; include <sys/syscall.h> instead."
++#endif
++
++/*
++   Some of the sneaky macros in the code were taken from
++   glibc-2.2.5/sysdeps/unix/sysv/linux/x86_64/sysdep.h
++*/
++
++#ifndef __ASSEMBLER__
++
++#include <errno.h>
++
++#ifndef INTERNAL_SYSCALL_DECL
++# define INTERNAL_SYSCALL_DECL(err)         do { } while (0)
++#endif
++#ifndef INTERNAL_SYSCALL_ERROR_P
++# define INTERNAL_SYSCALL_ERROR_P(val, err) ((unsigned long)val >= (unsigned long)(-4095))
++#endif
++#ifndef INTERNAL_SYSCALL_ERRNO
++# define INTERNAL_SYSCALL_ERRNO(val, err)   (-(val))
++#endif
++
++/* No point in forcing people to implement both when they only need one */
++#ifndef INTERNAL_SYSCALL
++# define INTERNAL_SYSCALL(name, err, nr, args...) INTERNAL_SYSCALL_NCS(__NR_##name, err, nr, args)
++#endif
++
++/* The Linux/x86-64 kernel expects the system call parameters in
++   registers according to the following table:
++
++    syscall number	rax
++    arg 1		rdi
++    arg 2		rsi
++    arg 3		rdx
++    arg 4		r10
++    arg 5		r8
++    arg 6		r9
++
++    The Linux kernel uses and destroys internally these registers:
++    return address from
++    syscall		rcx
++    additionally clobered: r12-r15,rbx,rbp
++    eflags from syscall	r11
++
++    Normal function call, including calls to the system call stub
++    functions in the libc, get the first six parameters passed in
++    registers and the seventh parameter and later on the stack.  The
++    register use is as follows:
++
++     system call number	in the DO_CALL macro
++     arg 1		rdi
++     arg 2		rsi
++     arg 3		rdx
++     arg 4		rcx
++     arg 5		r8
++     arg 6		r9
++
++    We have to take care that the stack is aligned to 16 bytes.  When
++    called the stack is not aligned since the return address has just
++    been pushed.
++
++
++    Syscalls of more than 6 arguments are not supported.  */
++
++#undef	DO_CALL
++#define DO_CALL(syscall_name, args)		\
++    DOARGS_##args				\
++    movq $SYS_ify (syscall_name), %rax;		\
++    syscall;
++
++#define DOARGS_0 /* nothing */
++#define DOARGS_1 /* nothing */
++#define DOARGS_2 /* nothing */
++#define DOARGS_3 /* nothing */
++#define DOARGS_4 movq %rcx, %r10;
++#define DOARGS_5 DOARGS_4
++#define DOARGS_6 DOARGS_5
++
++/* Define a macro which expands inline into the wrapper code for a system
++   call.  */
++#define INTERNAL_SYSCALL_NCS(name, err, nr, args...) \
++(__extension__ \
++  ({									      \
++    unsigned long resultvar;						      \
++    LOAD_ARGS_##nr (args)						      \
++    LOAD_REGS_##nr							      \
++    __asm__ __volatile__ (						      \
++    "syscall\n\t"							      \
++    : "=a" (resultvar)							      \
++    : "0" (name) ASM_ARGS_##nr : "memory", "cc", "r11", "cx");		      \
++    (long) resultvar;							      \
++   }) \
++)
++#define LOAD_ARGS_0()
++#define LOAD_REGS_0
++#define ASM_ARGS_0
++
++#define LOAD_ARGS_1(a1)					\
++  long int __arg1 = (long) (a1);			\
++  LOAD_ARGS_0 ()
++#define LOAD_REGS_1					\
++  register long int __a1 __asm__ ("rdi") = __arg1;	\
++  LOAD_REGS_0
++#define ASM_ARGS_1	ASM_ARGS_0, "r" (__a1)
++
++#define LOAD_ARGS_2(a1, a2)				\
++  long int __arg2 = (long) (a2);			\
++  LOAD_ARGS_1 (a1)
++#define LOAD_REGS_2					\
++  register long int __a2 __asm__ ("rsi") = __arg2;	\
++  LOAD_REGS_1
++#define ASM_ARGS_2	ASM_ARGS_1, "r" (__a2)
++
++#define LOAD_ARGS_3(a1, a2, a3)				\
++  long int __arg3 = (long) (a3);			\
++  LOAD_ARGS_2 (a1, a2)
++#define LOAD_REGS_3					\
++  register long int __a3 __asm__ ("rdx") = __arg3;	\
++  LOAD_REGS_2
++#define ASM_ARGS_3	ASM_ARGS_2, "r" (__a3)
++
++#define LOAD_ARGS_4(a1, a2, a3, a4)			\
++  long int __arg4 = (long) (a4);			\
++  LOAD_ARGS_3 (a1, a2, a3)
++#define LOAD_REGS_4					\
++  register long int __a4 __asm__ ("r10") = __arg4;	\
++  LOAD_REGS_3
++#define ASM_ARGS_4	ASM_ARGS_3, "r" (__a4)
++
++#define LOAD_ARGS_5(a1, a2, a3, a4, a5)			\
++  long int __arg5 = (long) (a5);			\
++  LOAD_ARGS_4 (a1, a2, a3, a4)
++#define LOAD_REGS_5					\
++  register long int __a5 __asm__ ("r8") = __arg5;	\
++  LOAD_REGS_4
++#define ASM_ARGS_5	ASM_ARGS_4, "r" (__a5)
++
++#define LOAD_ARGS_6(a1, a2, a3, a4, a5, a6)		\
++  long int __arg6 = (long) (a6);			\
++  LOAD_ARGS_5 (a1, a2, a3, a4, a5)
++#define LOAD_REGS_6					\
++  register long int __a6 __asm__ ("r9") = __arg6;	\
++  LOAD_REGS_5
++#define ASM_ARGS_6	ASM_ARGS_5, "r" (__a6)
++
++#endif /* __ASSEMBLER__ */
++#endif /* _BITS_SYSCALLS_H */
+diff -urN libaio-0.3.109/src/io_cancel.c libaio-0.3.109-new/src/io_cancel.c
+--- libaio-0.3.109/src/io_cancel.c	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/io_cancel.c	2013-09-23 23:39:33.669197166 -0400
+@@ -1,6 +1,7 @@
+ /* io_cancel.c
+    libaio Linux async I/O interface
+    Copyright 2002 Red Hat, Inc.
++   Copyright 2012 Ruslan Nikolaev <rnikola@vt.edu>
+ 
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+@@ -17,7 +18,42 @@
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307  USA
+  */
+ #include <libaio.h>
+-#include "syscall.h"
++#include <malloc.h>
++#include "sclib_aio.h"
++
++int io_cancel_0_4(io_context_t ctx, struct iocb *iocb, struct io_event *event)
++{
++	io_context_t *ref;
++	long ret;
++	int sysid;
++
++	ret = sclib_aio_get(&sclib_aio, ctx);
++	SCLIB_SYS_RET(ret);
++	ref = sclib_aio_ref(&sclib_aio, ctx);
++	sysid = IOCB_FLAG_GET_SYSID(iocb->u.c.flags);
++	if (sysid != SYSCALL_SYSID_LOCAL) {
++		struct io_event *net_event = sclib_memory_alloc(&sclib_data[sysid], sizeof(struct io_event));
++		SCLIB_MEM_RET(net_event, ret);
++		ret = SCLIB_REMOTE_CALL(sysid, io_cancel, 3, ref[sysid], sclib_mem(sysid, iocb->u.c.map), sclib_mem(sysid, net_event));
++		memcpy(event, net_event, sizeof(struct io_event));
++		sclib_memory_free(&sclib_data[sysid], net_event);
++		if (!SCLIB_IS_ERR(ret)) {
++			sclib_memory_free(&sclib_data[sysid], event->obj);
++			event->obj = iocb;
++		}
++	} else {
++		ret = SCLIB_LOCAL_CALL(io_cancel, 3, ref[SYSCALL_SYSID_LOCAL], iocb->u.c.map, event);
++		if (!SCLIB_IS_ERR(ret)) {
++			if (iocb->u.c.flags & IOCB_FLAG_RESFD)
++				sclib_file_put(&sclib_file, iocb->u.c.resfd);
++			sclib_file_put(&sclib_file, iocb->aio_fildes);
++			free(event->obj);
++			event->obj = iocb;
++		}
++	}
++error_mem:
++	sclib_aio_put(&sclib_aio, ctx);
++	return ret;
++}
+ 
+-io_syscall3(int, io_cancel_0_4, io_cancel, io_context_t, ctx, struct iocb *, iocb, struct io_event *, event)
+ DEFSYMVER(io_cancel_0_4, io_cancel, 0.4)
+diff -urN libaio-0.3.109/src/io_destroy.c libaio-0.3.109-new/src/io_destroy.c
+--- libaio-0.3.109/src/io_destroy.c	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/io_destroy.c	2013-09-23 23:39:33.669197166 -0400
+@@ -1,6 +1,7 @@
+ /* io_destroy
+    libaio Linux async I/O interface
+    Copyright 2002 Red Hat, Inc.
++   Copyright 2012 Ruslan Nikolaev <rnikola@vt.edu>
+ 
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+@@ -18,6 +19,15 @@
+  */
+ #include <errno.h>
+ #include <libaio.h>
+-#include "syscall.h"
++#include "sclib_aio.h"
++
++int io_destroy(io_context_t ctx)
++{
++	long ret;
++
++	ret = sclib_aio_get(&sclib_aio, ctx);
++	SCLIB_SYS_RET(ret);
++	sclib_aio_release(&sclib_aio, ctx);
++	return 0;
++}
+ 
+-io_syscall1(int, io_destroy, io_destroy, io_context_t, ctx)
+diff -urN libaio-0.3.109/src/io_getevents.c libaio-0.3.109-new/src/io_getevents.c
+--- libaio-0.3.109/src/io_getevents.c	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/io_getevents.c	2013-09-23 23:39:33.669197166 -0400
+@@ -1,6 +1,7 @@
+ /* io_getevents.c
+    libaio Linux async I/O interface
+    Copyright 2002 Red Hat, Inc.
++   Copyright 2012 Ruslan Nikolaev <rnikola@vt.edu>
+ 
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+@@ -20,9 +21,8 @@
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <time.h>
+-#include "syscall.h"
+-
+-io_syscall5(int, __io_getevents_0_4, io_getevents, io_context_t, ctx, long, min_nr, long, nr, struct io_event *, events, struct timespec *, timeout)
++#include <malloc.h>
++#include "sclib_aio.h"
+ 
+ #define AIO_RING_MAGIC                  0xa10a10a1
+ 
+@@ -39,7 +39,7 @@
+ 	unsigned        header_length;  /* size of aio_ring */
+ };
+ 
+-int io_getevents_0_4(io_context_t ctx, long min_nr, long nr, struct io_event * events, struct timespec * timeout)
++static inline int local_io_getevents(io_context_t ctx, long min_nr, long nr, struct io_event * events, struct timespec * timeout)
+ {
+ 	struct aio_ring *ring;
+ 	ring = (struct aio_ring*)ctx;
+@@ -51,7 +51,32 @@
+ 	}
+ 	
+ do_syscall:	
+-	return __io_getevents_0_4(ctx, min_nr, nr, events, timeout);
++	return SCLIB_LOCAL_CALL(io_getevents, 5, ctx, min_nr, nr, events, timeout);
++}
++
++int io_getevents_0_4(io_context_t ctx, long min_nr, long nr, struct io_event *events, struct timespec *timeout)
++{
++	struct iocb *iocb, *iocb_map;
++	io_context_t *ref;
++	long ret, i;
++
++	ret = sclib_aio_get(&sclib_aio, ctx);
++	SCLIB_SYS_RET(ret);
++	ref = sclib_aio_ref(&sclib_aio, ctx);
++	ret = local_io_getevents(ref[SYSCALL_SYSID_LOCAL], min_nr, nr, events, timeout);
++	if (!SCLIB_IS_ERR(ret)) {
++		for (i = 0; i < ret; i++) {
++			iocb_map = events[i].obj;
++			iocb = iocb_map->u.c.map;
++			events[i].obj = iocb;
++			if (iocb->u.c.flags & IOCB_FLAG_RESFD)
++				sclib_file_put(&sclib_file, iocb->u.c.resfd);
++			sclib_file_put(&sclib_file, iocb->aio_fildes);
++			free(iocb_map);
++		}
++	}
++	sclib_aio_put(&sclib_aio, ctx);
++	return ret;
+ }
+ 
+ DEFSYMVER(io_getevents_0_4, io_getevents, 0.4)
+diff -urN libaio-0.3.109/src/io_setup.c libaio-0.3.109-new/src/io_setup.c
+--- libaio-0.3.109/src/io_setup.c	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/io_setup.c	2013-09-23 23:39:33.669197166 -0400
+@@ -1,6 +1,7 @@
+ /* io_setup
+    libaio Linux async I/O interface
+    Copyright 2002 Red Hat, Inc.
++   Copyright 2012 Ruslan Nikolaev <rnikola@vt.edu>
+ 
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+@@ -18,6 +19,49 @@
+  */
+ #include <errno.h>
+ #include <libaio.h>
+-#include "syscall.h"
++#include "sclib_aio.h"
+ 
+-io_syscall2(int, io_setup, io_setup, int, maxevents, io_context_t *, ctxp)
++int io_setup(int maxevents, io_context_t *ctxp)
++{
++	io_context_t ctx;
++	io_context_t *ref;
++	unsigned long ret;
++//	syscall_udw_t dwret;
++	size_t i;
++
++	if (unlikely(*ctxp != 0))
++		return -EINVAL;
++
++	ctx = sclib_aio_add(&sclib_aio);
++	SCLIB_SYS_RET((unsigned long) ctx);
++	ref = sclib_aio_ref(&sclib_aio, ctx);
++
++	for (i = 0; i < SYSCALL_SYSIDS; i++) {
++#if 0
++		dwret = SCLIB_REMOTE_CALL_DW(io_setup, 2, maxevents, 0);
++		ret = syscall_result_lower(dwret);
++		SCLIB_VAL_RET(ret, ret);
++		ref[i] = (io_context_t) syscall_result_upper(dwret);
++#else /* Disable remote domains for now */
++		ref[i] = (io_context_t) 0;
++#endif
++	}
++
++	ref[SYSCALL_SYSID_LOCAL] = 0;
++	ret = SCLIB_LOCAL_CALL(io_setup, 2, maxevents, ref + SYSCALL_SYSID_LOCAL);
++	SCLIB_VAL_RET(ret, ret);
++
++	sclib_aio_add_ok(&sclib_aio, ctx);
++	*ctxp = ctx;
++	return 0;
++
++error_val:
++#if 0
++	while (i != 0) {
++		--i;
++		SCLIB_REMOTE_CALL(io_destroy, 1, ref[i]);
++	}
++#endif
++	sclib_aio_add_fail(&sclib_aio, ctx);
++	return ret;
++}
+diff -urN libaio-0.3.109/src/io_submit.c libaio-0.3.109-new/src/io_submit.c
+--- libaio-0.3.109/src/io_submit.c	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/io_submit.c	2013-09-23 23:39:33.713197167 -0400
+@@ -1,6 +1,7 @@
+ /* io_submit
+    libaio Linux async I/O interface
+    Copyright 2002 Red Hat, Inc.
++   Copyright 2012 Ruslan Nikolaev <rnikola@vt.edu>
+ 
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public
+@@ -18,6 +19,164 @@
+  */
+ #include <errno.h>
+ #include <libaio.h>
+-#include "syscall.h"
++#include <malloc.h>
++#include "sclib_aio.h"
++
++int io_submit(io_context_t ctx, long nr, struct iocb **iocbs)
++{
++	struct iocb *iocb, *iocb_new, **iocbs_net, *iocbs_loc[1024];
++	io_context_t *ref;
++	struct sclib_iovc iovc;
++	int sysid;
++	size_t len;
++	long resdfd, dfd, i, lret = -EINVAL, nret = -EINVAL, ret, loc = 0, net = 0;
++	syscall_entry_t *pos;
++	void *buf;
++
++	if ((unsigned long) nr > 1024)
++		return -EINVAL;
++
++	ret = sclib_aio_get(&sclib_aio, ctx);
++	SCLIB_SYS_RET(ret);
++	ref = sclib_aio_ref(&sclib_aio, ctx);
++	iocbs_net = sclib_memory_alloc(&sclib_data[SYSCALL_SYSID_STORAGE], sizeof(struct iocb *) * nr);
++	SCLIB_MEM_RET(iocbs_net, ret);
++
++	for (i = 0; i != nr; i++) {
++		iocb = iocbs[i];
++		dfd = sclib_file_getid(&sclib_file, iocb->aio_fildes, &sysid);
++		SCLIB_VAL_RET(dfd, ret);
++		resdfd = -1;
++		if (iocb->u.c.flags & IOCB_FLAG_RESFD) {
++			resdfd = sclib_file_get(&sclib_file, iocb->u.c.resfd, sysid);
++			SCLIB_VAL2_RET(resdfd, ret);
++		}
++		if (sysid == SYSCALL_SYSID_STORAGE) {
++			iocb_new = sclib_memory_alloc(&sclib_data[SYSCALL_SYSID_STORAGE], sizeof(struct iocb));
++			if (unlikely(iocb_new == NULL))
++				goto error_mem2;
++			iocb_new = memcpy(iocb_new, iocb, sizeof(struct iocb));
++			switch (iocb->aio_lio_opcode) {
++			case IO_CMD_PREAD:
++				len = iocb->u.c.nbytes;
++				buf = sclib_memory_alloc(&sclib_data[SYSCALL_SYSID_STORAGE], len);
++				if (unlikely(buf == NULL))
++					goto error_mem2;
++				iocb_new->u.c.buf = sclib_mem(SYSCALL_SYSID_STORAGE, buf);
++				iocb_new->u.c.nbytes = len;
++				break;
++			case IO_CMD_PWRITE:
++				len = iocb->u.c.nbytes;
++				buf = sclib_memory_alloc(&sclib_data[SYSCALL_SYSID_STORAGE], len);
++				if (unlikely(buf == NULL))
++					goto error_mem2;
++				iocb_new->u.c.buf = sclib_mem(SYSCALL_SYSID_STORAGE, buf);
++				iocb_new->u.c.nbytes = len;
++				memcpy(buf, iocb->u.c.buf, iocb->u.c.nbytes);
++				break;
++			case IO_CMD_PREADV:
++				len = sclib_iovec_length((struct iovec *) iocb->u.c.buf,
++					iocb->u.c.nbytes);
++				if (SCLIB_IS_ERR(len)) {
++					ret = len;
++					goto error_val3;
++				}
++				buf = sclib_memory_alloc(&sclib_data[SYSCALL_SYSID_STORAGE], len);
++				if (unlikely(buf == NULL))
++					goto error_mem2;
++				iocb_new->u.c.buf = sclib_mem(SYSCALL_SYSID_STORAGE, buf);
++				iocb_new->u.c.nbytes = len;
++				iocb_new->aio_lio_opcode = IO_CMD_PREAD;
++				break;
++			case IO_CMD_PWRITEV:
++				len = sclib_iovec_length((struct iovec *) iocb->u.c.buf,
++					iocb->u.c.nbytes);
++				if (SCLIB_IS_ERR(len)) {
++					ret = len;
++					goto error_val3;
++				}
++				buf = sclib_memory_alloc(&sclib_data[SYSCALL_SYSID_STORAGE], len);
++				if (unlikely(buf == NULL))
++					goto error_mem2;
++				iocb_new->u.c.buf = sclib_mem(SYSCALL_SYSID_STORAGE, buf);
++				iocb_new->u.c.nbytes = len;
++				iocb_new->aio_lio_opcode = IO_CMD_PWRITE;
++				iovc.iovc_iov = (struct iovec *) iocb->u.c.buf;
++				iovc.iovc_off = 0;
++				sclib_copy_from_iovec(buf, &iovc, len);
++				break;
++			default:
++				iocb_new->u.c.buf = NULL;
++				break;
++			}
++			iocbs_net[net++] = sclib_mem(SYSCALL_SYSID_STORAGE, iocb_new);
++		} else {
++			iocb_new = malloc(sizeof(struct iocb));
++			if (unlikely(iocb_new == NULL)) {
++error_mem2:
++				ret = -ENOMEM;
++error_val3:
++				if (iocb->u.c.flags & IOCB_FLAG_RESFD) {
++					sclib_file_put(&sclib_file, iocb->u.c.resfd);
++				}
++error_val2:
++				sclib_file_put(&sclib_file, iocb->aio_fildes);
++				goto error_val;
++			}
++			iocb_new = memcpy(iocb_new, iocb, sizeof(struct iocb));
++			iocbs_loc[loc++] = iocb_new;
++		}
++		if (resdfd >= 0)
++			iocb->u.c.resfd = resdfd;
++		IOCB_FLAG_SET_SYSID(iocb->u.c.flags, sysid);
++		iocb->u.c.map = iocb_new;
++		iocb_new->u.c.map = iocb;
++		iocb_new->aio_fildes = dfd;
++	}
++
++	nret = 0;
++	lret = 0;
++	if (net != 0)
++		pos = SCLIB_REMOTE_CALL_ASYNC(SYSCALL_SYSID_STORAGE, io_submit, 3, ref[SYSCALL_SYSID_STORAGE], net, sclib_mem(SYSCALL_SYSID_STORAGE, iocbs_net));
++	if (loc != 0)
++		lret = SCLIB_LOCAL_CALL(io_submit, 3, ref[SYSCALL_SYSID_LOCAL], loc, iocbs_loc);
++	if (net != 0)
++		nret = SCLIB_REMOTE_CALL_RESULT(SYSCALL_SYSID_STORAGE, io_submit, pos);
++
++	if (SCLIB_IS_ERR(nret)) {
++		ret = lret;
++	} else if (SCLIB_IS_ERR(lret)) {
++		ret = nret;
++	} else {
++		ret = lret + nret;
++	}
++
++	if (SCLIB_IS_ERR(ret)) {
++error_val:
++		while (i != 0) {
++			iocb = iocbs[--i];
++			if (iocb->u.c.flags & IOCB_FLAG_RESFD)
++				sclib_file_put(&sclib_file, iocb->u.c.resfd);
++			sclib_file_put(&sclib_file, iocb->aio_fildes);
++		}
++		if (SCLIB_IS_ERR(lret)) { /* Deallocate in case of errors */
++			while (loc != 0) {
++				iocb = iocbs_loc[--loc];
++				free(iocb);
++			}
++		}
++		if (SCLIB_IS_ERR(nret)) {
++			while (net != 0) {
++				iocb = sclib_usermem(SYSCALL_SYSID_STORAGE, iocbs_net[--net]);
++				if (iocb->u.c.buf != NULL)
++					sclib_memory_free(&sclib_data[SYSCALL_SYSID_STORAGE], sclib_usermem(SYSCALL_SYSID_STORAGE, iocb->u.c.buf));
++				sclib_memory_free(&sclib_data[SYSCALL_SYSID_STORAGE], iocb);
++			}
++		}
++	}
++	sclib_memory_free(&sclib_data[SYSCALL_SYSID_STORAGE], iocbs_net);
++error_mem:
++	sclib_aio_put(&sclib_aio, ctx);
++	return ret;
++}
+ 
+-io_syscall3(int, io_submit, io_submit, io_context_t, ctx, long, nr, struct iocb **, iocbs)
+diff -urN libaio-0.3.109/src/libaio.h libaio-0.3.109-new/src/libaio.h
+--- libaio-0.3.109/src/libaio.h	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/libaio.h	2013-09-23 23:39:33.713197167 -0400
+@@ -1,6 +1,7 @@
+ /* /usr/include/libaio.h
+  *
+  * Copyright 2000,2001,2002 Red Hat, Inc.
++ * Copyright 2012 Ruslan Nikolaev <rnikola@vt.edu>
+  *
+  * Written by Benjamin LaHaise <bcrl@redhat.com>
+  *
+@@ -33,6 +34,7 @@
+ struct timespec;
+ struct sockaddr;
+ struct iovec;
++struct iocb;
+ 
+ typedef struct io_context *io_context_t;
+ 
+@@ -100,7 +102,7 @@
+ 	PADDEDptr(void	*buf, __pad1);
+ 	PADDEDul(nbytes, __pad2);
+ 	long long	offset;
+-	long long	__pad3;
++	PADDEDptr(struct iocb	*map, __pad3);	/* translated/original copy */
+ 	unsigned	flags;
+ 	unsigned	resfd;
+ };	/* result code is the amount read or -'ve errno */
+diff -urN libaio-0.3.109/src/Makefile libaio-0.3.109-new/src/Makefile
+--- libaio-0.3.109/src/Makefile	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/Makefile	2013-09-23 23:39:33.713197167 -0400
+@@ -3,7 +3,7 @@
+ libdir=$(prefix)/lib
+ 
+ ARCH := $(shell uname -m | sed -e s/i.86/i386/)
+-CFLAGS := -nostdlib -nostartfiles -Wall -I. -g -fomit-frame-pointer -O2 -fPIC
++CFLAGS := -Wall -I. -g -fomit-frame-pointer -O2 -fPIC
+ SO_CFLAGS=-shared $(CFLAGS)
+ L_CFLAGS=$(CFLAGS)
+ LINK_FLAGS=
+@@ -17,7 +17,7 @@
+ all: $(all_targets)
+ 
+ # libaio provided functions
+-libaio_srcs := io_queue_init.c io_queue_release.c
++libaio_srcs := sclib_aio.c io_queue_init.c io_queue_release.c
+ libaio_srcs += io_queue_wait.c io_queue_run.c
+ 
+ # real syscalls
+diff -urN libaio-0.3.109/src/sclib_aio.c libaio-0.3.109-new/src/sclib_aio.c
+--- libaio-0.3.109/src/sclib_aio.c	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/sclib_aio.c	2013-09-23 23:39:33.713197167 -0400
+@@ -0,0 +1,42 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#include "sclib_aio.h"
++
++__attribute__ ((constructor))
++	void aio_init(void)
++{
++	size_t i;
++	for (i = 0; i < sizeof(sclib_aio.map) / sizeof(sclib_aio.map[0]); i++)
++		sclib_aio.map[i].counter = 0;
++	memset(sclib_aio.bitmap, 0xFF, sizeof(sclib_aio.bitmap));
++}
++
++void sclib_aio_destroy(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	size_t i;
++	/* Disable remote domains for now */
++	for (i = SYSCALL_SYSIDS; i < SYSCALL_SYSIDS + 1; i++) {
++		SCLIB_SYSID_CALL(i, io_destroy, 1, aio->map[(unsigned long) ctx].ctx[i]);
++	}
++}
+diff -urN libaio-0.3.109/src/sclib_aio.h libaio-0.3.109-new/src/sclib_aio.h
+--- libaio-0.3.109/src/sclib_aio.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/sclib_aio.h	2013-09-23 23:39:33.713197167 -0400
+@@ -0,0 +1,136 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SCLIB_AIO_H
++#define _SCLIB_AIO_H 1
++
++#include "libaio.h"
++
++#define libc_hidden_proto(x)
++
++#include "syscall.h"
++
++#ifndef __cplusplus
++# define true	1
++# define false	0
++typedef unsigned char bool;
++#endif
++
++#include "sclib.h"
++
++#define IOCB_FLAG_RESFD				(1 << 0)
++#define IOCB_FLAG_SET_SYSID(x,s)	((x) |= ((s) << 1))
++#define IOCB_FLAG_GET_SYSID(x)		(((x) >> 1) & 0xF)
++
++#define SCLIB_AIO_TABLE_LENGTH	1024
++
++#define SCLIB_AIO_IS_LOCAL(ent)	\
++	if ((unsigned long) (-ent->c.u.lfd) < 4096)
++
++typedef struct sclib_aio_entry_s {
++	io_context_t	ctx[SYSCALL_SYSIDS+1];
++	unsigned long	counter;
++} sclib_aio_entry_t;
++
++typedef struct sclib_aio_table_s {
++	sclib_aio_entry_t	map[SCLIB_AIO_TABLE_LENGTH];
++	unsigned long bitmap[SCLIB_AIO_TABLE_LENGTH / (sizeof(long) * 8)];
++} sclib_aio_table_t;
++
++sclib_aio_table_t sclib_aio;
++
++void sclib_aio_destroy(sclib_aio_table_t *aio, io_context_t ctx);
++
++static inline bool sclib_incref_aio(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	unsigned long val;
++
++	/* Increment if context is in ready state */
++	do {
++		val = aio->map[(unsigned long) ctx].counter;
++		if (val <= 2)
++			return false;
++	} while (!__sync_bool_compare_and_swap(&aio->map[(unsigned long) ctx].counter, val, val + 1));
++	return true;
++}
++
++static inline void sclib_putref_aio(sclib_aio_table_t *aio, io_context_t ctx, unsigned long step)
++{
++	if (__sync_sub_and_fetch(&aio->map[(unsigned long) ctx].counter, step) == 2) {
++		sclib_aio_destroy(aio, ctx);
++		sclib_bitmap_toggle(aio->bitmap, (unsigned long) ctx);
++		__sync_fetch_and_sub(&aio->map[(unsigned long) ctx].counter, 2);
++	}
++}
++
++static inline io_context_t sclib_aio_add(sclib_aio_table_t *aio)
++{
++	long ctx;
++	SCLIB_LOCK_CHECK_INIT
++
++	do {
++		SCLIB_LOCK_CHECK_STEP
++		/* Optimistic search */
++		ctx = sclib_bitmap_find(aio->bitmap, sizeof(aio->bitmap), 0);
++		if (unlikely(ctx < 0))
++			return (io_context_t) ctx;
++	} while (!__sync_bool_compare_and_swap(&aio->map[ctx].counter, 0, 1));
++	sclib_bitmap_toggle(aio->bitmap, ctx);
++	return (io_context_t) ctx;
++}
++
++static inline void sclib_aio_add_fail(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	sclib_bitmap_toggle(aio->bitmap, (unsigned long) ctx);
++	__sync_fetch_and_sub(&aio->map[(unsigned long) ctx].counter, 1);
++}
++
++static inline void sclib_aio_add_ok(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	__sync_fetch_and_add(&aio->map[(unsigned long) ctx].counter, 2);
++}
++
++static inline long sclib_aio_get(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	if (unlikely((unsigned long) ctx >= SCLIB_AIO_TABLE_LENGTH
++			|| !sclib_incref_aio(aio, ctx)))
++		return -EINVAL;
++	return 0;
++}
++
++static inline io_context_t *sclib_aio_ref(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	return aio->map[(unsigned long) ctx].ctx;
++}
++
++static inline void sclib_aio_put(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	sclib_putref_aio(aio, ctx, 1);
++}
++
++static inline void sclib_aio_release(sclib_aio_table_t *aio, io_context_t ctx)
++{
++	sclib_putref_aio(aio, ctx, 2);
++}
++
++#endif /* !_SCLIB_AIO_H */
+diff -urN libaio-0.3.109/src/sclib.h libaio-0.3.109-new/src/sclib.h
+--- libaio-0.3.109/src/sclib.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/sclib.h	2013-09-23 23:39:33.713197167 -0400
+@@ -0,0 +1,10 @@
++#ifndef _SCLIB_H
++#define _SCLIB_H 1
++
++struct syscall_entry;
++
++extern void __sclib_schedule(int sysid, struct syscall_entry *entry);
++
++#include "sclib_public.h"
++
++#endif /* !_SCLIB_H */
+diff -urN libaio-0.3.109/src/sclib_public.h libaio-0.3.109-new/src/sclib_public.h
+--- libaio-0.3.109/src/sclib_public.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/sclib_public.h	2013-09-23 23:40:55.961200580 -0400
+@@ -0,0 +1,1086 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SCLIB_PUBLIC_H
++#define _SCLIB_PUBLIC_H 1
++
++#include <inttypes.h>
++#include <sys/types.h>
++#include <errno.h>
++#include <sys/socket.h>
++#include <sys/ioctl.h>
++#include <sys/syscall.h>
++#include <sys/param.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <features.h>
++#include <stdio.h>
++#include <string.h>
++#include <stdlib.h>
++#include <limits.h>
++
++/* A special value for epoll */
++#define EPOLLEFD	(1 << 23)
++
++#define SCLIB_LIB_PATH			"/usr/sclib/lib"
++#define SCLIB_STORAGE_PREFIX	"/storage"
++#define SCLIB_MAX_BUFFER		(SYSCALL_DATA_SHARED_PAGES * PAGE_SIZE) / 8
++
++#define smp_mb()				__sync_synchronize()
++
++#ifndef likely
++# define likely(x)				__builtin_expect((x),1)
++#endif
++#ifndef unlikely
++# define unlikely(x)			__builtin_expect((x),0)
++#endif
++
++#include "_syscall.h"
++#include "_syscall_stack.h"
++#include "_syscall_num.h"
++
++#define SYSCALL_SYSID_ALL		-1
++#define SYSCALL_SYSID_LOCAL		SYSCALL_SYSIDS
++
++struct syscall_efd {
++	uint64_t efd_num;
++	int n;
++	int efd[SYSCALL_SYSIDS+1];
++};
++
++/* Sclib iovec cookie */
++struct sclib_iovc {
++	const struct iovec *iovc_iov;
++	size_t iovc_off;
++};
++
++#define SCLIB_IS_ERR(x)	\
++	(unlikely((unsigned long) (x) >= (unsigned long) (-4095L)))
++
++#define SCLIB_ERR_RET(x) \
++	do { \
++		if (SCLIB_IS_ERR(x)) { \
++			__set_errno(-(x)); \
++			return -1; \
++		} \
++	} while (0);
++
++#define SCLIB_SYS_RET(x) \
++	do { \
++		if (SCLIB_IS_ERR(x)) \
++			return (x); \
++	} while (0);
++
++#define SCLIB_VAL_RET(e, r) \
++	do { \
++		if (SCLIB_IS_ERR(e)) { \
++			(r) = (e); \
++			goto error_val; \
++		} \
++	} while (0);
++
++#define SCLIB_VAL2_RET(e, r) \
++	do { \
++		if (SCLIB_IS_ERR(e)) { \
++			(r) = (e); \
++			goto error_val2; \
++		} \
++	} while (0);
++
++#define SCLIB_MEM_RET(x, r) \
++	do { \
++		if (unlikely((x) == NULL)) { \
++			(r) = -ENOMEM; \
++			goto error_mem; \
++		} \
++	} while (0);
++
++#define SCLIB_DFD_SYSCALL(call, par, fd, ...) (__extension__ ({ \
++	long __ret, __dfd; \
++	int __sysid; \
++	__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++	SCLIB_ERR_RET(__dfd); \
++	__ret = SCLIB_SYSID_CALL(__sysid, call, par, __dfd, ##__VA_ARGS__); \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_INBUF_SYSCALL(call, sz, par, fd, buf, ...) (__extension__ ({ \
++	long __ret, __dfd; \
++	int __sysid; \
++	void *__rbuf; \
++	size_t __sz; \
++	__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++	SCLIB_ERR_RET(__dfd); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz = (sz); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		__rbuf = memcpy(__rbuf, (buf), __sz); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, sclib_mem(__sysid, __rbuf), ##__VA_ARGS__); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_STR_INBUF_SYSCALL(call, sz1, sz2, par, fd, str, buf, ...) (__extension__ ({ \
++	long __ret, __dfd; \
++	int __sysid; \
++	void *__rbuf, *__off; \
++	size_t __sz1, __sz2; \
++	__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++	SCLIB_ERR_RET(__dfd); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz1 = (sz1); \
++		__sz2 = (sz2); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		memcpy(mempcpy(__rbuf, (buf), __sz2), str, __sz1); \
++		__off = sclib_mem(__sysid, __rbuf); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, __off + __sz2, __off, ##__VA_ARGS__); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, str, buf, ##__VA_ARGS__); \
++	} \
++error_mem: \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_OUTBUF_SYSCALL(call, sz, par, fd, buf, ...) (__extension__ ({ \
++	long __ret, __dfd; \
++	int __sysid; \
++	void *__rbuf; \
++	size_t __sz; \
++	__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++	SCLIB_ERR_RET(__dfd); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz = (sz); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, sclib_mem(__sysid, __rbuf), ##__VA_ARGS__); \
++		if (!SCLIB_IS_ERR(__ret)) \
++			memcpy((buf), __rbuf, __ret); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_OUTBUFSZ_SYSCALL(call, sz, par, fd, buf, ...) (__extension__ ({ \
++	long __ret, __dfd; \
++	int __sysid; \
++	void *__rbuf; \
++	size_t __sz; \
++	__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++	SCLIB_ERR_RET(__dfd); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz = (sz); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, sclib_mem(__sysid, __rbuf), ##__VA_ARGS__); \
++		if (!SCLIB_IS_ERR(__ret)) \
++			memcpy((buf), __rbuf, __sz); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_STR_OUTBUF_SYSCALL(call, sz1, sz2, par, fd, str, buf, ...) (__extension__ ({ \
++	long __ret, __dfd; \
++	int __sysid; \
++	void *__rbuf, *__off; \
++	size_t __sz1, __sz2; \
++	__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++	SCLIB_ERR_RET(__dfd); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz1 = (sz1); \
++		__sz2 = (sz2); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		memcpy(__rbuf + __sz2, str, __sz1); \
++		__off = sclib_mem(__sysid, __rbuf); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, __off + __sz2, __off, ##__VA_ARGS__); \
++		if (!SCLIB_IS_ERR(__ret)) \
++			memcpy((buf), __rbuf, __ret); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, str, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_LFD_SYSCALL(call, par, fd, ...) (__extension__ ({ \
++	long __ret, __lfd; \
++	__lfd = sclib_file_get(&sclib_file, (fd), SYSCALL_SYSID_LOCAL); \
++	SCLIB_ERR_RET(__lfd); \
++	__ret = SCLIB_LOCAL_CALL(call, par, __lfd, ##__VA_ARGS__); \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_LFDPATH_SYSCALL(call, par, fd, path, ...) (__extension__ ({ \
++	long __ret, __lfd; \
++	size_t __sz; \
++	int __sysid; \
++	char __abspath[PATH_MAX], *__dpath; \
++	__dpath = sclib_get_path(__abspath, (path), &__sysid, &__sz); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__set_errno(EINVAL); \
++		return -1; \
++	} \
++	__lfd = sclib_file_get(&sclib_file, (fd), SYSCALL_SYSID_LOCAL); \
++	SCLIB_ERR_RET(__lfd); \
++	__ret = SCLIB_LOCAL_CALL(call, par, __lfd, __dpath, ##__VA_ARGS__); \
++	sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_LFD_SYSCALL2(call, par, fd1, fd2, ...) (__extension__ ({ \
++	long __ret, __lfd1, __lfd2; \
++	__lfd1 = sclib_file_get(&sclib_file, (fd1), SYSCALL_SYSID_LOCAL); \
++	if (SCLIB_IS_ERR(__lfd1)) { \
++		__ret = __lfd1; \
++		goto __lfd1_err; \
++	} \
++	__lfd2 = sclib_file_get(&sclib_file, (fd2), SYSCALL_SYSID_LOCAL); \
++	if (SCLIB_IS_ERR(__lfd2)) { \
++		__ret = __lfd2; \
++		goto __lfd2_err; \
++	} \
++	__ret = SCLIB_LOCAL_CALL(call, par, __lfd1, __lfd2, ##__VA_ARGS__); \
++	sclib_file_put(&sclib_file, (fd2)); \
++__lfd2_err: sclib_file_put(&sclib_file, (fd1)); \
++__lfd1_err:	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_SYSCALL_AT(call, par, fd, path, ...) (__extension__ ({ \
++	const char *__dpath = (const char *) (path); \
++	char __abspath[PATH_MAX]; \
++	void *__rbuf = __rbuf, *__off; \
++	size_t __sz; \
++	int __sysid; \
++	long __ret, __dfd; \
++	if ((fd) == AT_FDCWD) {	\
++		__dpath = sclib_get_path(__abspath, __dpath ? __dpath : "", &__sysid, &__sz); \
++		__dfd = -1; \
++	} else if (__dpath && *__dpath == '/') { \
++		__dpath = sclib_get_path(__abspath, __dpath, &__sysid, &__sz); \
++		__dfd = -1; \
++	} else { \
++		__sz = __dpath ? (strlen(__dpath) + 1) : 0; \
++		__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++		SCLIB_ERR_RET(__dfd); \
++	} \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__off = NULL; \
++		if (__sz != 0) { \
++			__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz); \
++			SCLIB_MEM_RET(__rbuf, __ret); \
++			memcpy(__rbuf, __dpath, __sz); \
++			__off = sclib_mem(__sysid, __rbuf); \
++		} \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, __off, ##__VA_ARGS__); \
++		if (__sz != 0) \
++			sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, __dpath, ##__VA_ARGS__); \
++	} \
++error_mem: \
++	if (__dfd >= 0) \
++		sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_INBUF_SYSCALL_AT(call, sz, par, fd, path, buf, ...) (__extension__ ({ \
++	const char *__dpath = (const char *) (path); \
++	char __abspath[PATH_MAX]; \
++	void *__rbuf = __rbuf, *__off; \
++	size_t __sz2, __sz1; \
++	int __sysid; \
++	long __ret, __dfd; \
++	if ((fd) == AT_FDCWD) {	\
++		__dpath = sclib_get_path(__abspath, __dpath ? __dpath : "", &__sysid, &__sz2); \
++		__dfd = -1; \
++	} else if (__dpath && *__dpath == '/') { \
++		__dpath = sclib_get_path(__abspath, __dpath, &__sysid, &__sz2); \
++		__dfd = -1; \
++	} else { \
++		__sz2 = __dpath ? (strlen(__dpath) + 1) : 0; \
++		__dfd = sclib_file_getid(&sclib_file, (fd), &__sysid); \
++		SCLIB_ERR_RET(__dfd); \
++	} \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz1 = (sz); \
++		__off = NULL; \
++		if (__sz1 + __sz2 != 0) { \
++			__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++			SCLIB_MEM_RET(__rbuf, __ret); \
++			memcpy(mempcpy(__rbuf, (buf), __sz1), __dpath, __sz2); \
++			__off = sclib_mem(__sysid, __rbuf); \
++		} \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd, __sz2 ? (__off + __sz1) : NULL, __off, ##__VA_ARGS__); \
++		if (__sz1 + __sz2 != 0) \
++			sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd, __dpath, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	if (__dfd >= 0) \
++		sclib_file_put(&sclib_file, (fd)); \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_DFD_SYSCALL_AT2(call, par, fd1, path1, fd2, path2, ...) (__extension__ ({ \
++	const char *__dpath1 = (const char *) (path1); \
++	const char *__dpath2 = (const char *) (path2); \
++	char __abspath1[PATH_MAX], __abspath2[PATH_MAX]; \
++	void *__rbuf = __rbuf, *__off; \
++	size_t __sz2, __sz1; \
++	int __sysid, __sysid2; \
++	long __ret, __dfd1, __dfd2; \
++	if ((fd1) == AT_FDCWD) { \
++		__dpath1 = sclib_get_path(__abspath1, __dpath1 ? __dpath1 : "", &__sysid, &__sz1); \
++		__dfd1 = -1; \
++	} else if (__dpath1 && *__dpath1 == '/') { \
++		__dpath1 = sclib_get_path(__abspath1, __dpath1, &__sysid, &__sz1); \
++		__dfd1 = -1; \
++	} else { \
++		__sz1 = __dpath1 ? (strlen(__dpath1) + 1) : 0; \
++		__dfd1 = sclib_file_getid(&sclib_file, (fd1), &__sysid); \
++		__ret = __dfd1; \
++		goto __dfd1_err; \
++	} \
++	if ((fd2) == AT_FDCWD) { \
++		__dpath2 = sclib_get_path(__abspath2, __dpath2 ? __dpath2 : "", &__sysid2, &__sz2); \
++		__dfd2 = -1; \
++	} else if (__dpath2 && *__dpath2 == '/') { \
++		__dpath2 = sclib_get_path(__abspath2, __dpath2, &__sysid2, &__sz2); \
++		__dfd2 = -1; \
++	} else { \
++		__sz2 = __dpath2 ? (strlen(__dpath2) + 1) : 0; \
++		__dfd2 = sclib_file_getid(&sclib_file, (fd2), &__sysid2); \
++		__ret = __dfd2; \
++		goto __dfd2_err; \
++	} \
++	if (__sysid != __sysid2) { \
++		__ret = -EINVAL; \
++		goto error_mem; \
++	} \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__off = NULL; \
++		if (__sz1 + __sz2 != 0) { \
++			__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++			SCLIB_MEM_RET(__rbuf, __ret); \
++			memcpy(mempcpy(__rbuf, __dpath1, __sz1), __dpath2, __sz2); \
++			__off = sclib_mem(__sysid, __rbuf); \
++		} \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __dfd1, __off, __dfd2, __sz2 ? (__off + __sz1) : NULL, ##__VA_ARGS__); \
++		if (__sz1 + __sz2 != 0) \
++			sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dfd1, __dpath1, __dfd2, __dpath2, ##__VA_ARGS__); \
++	} \
++error_mem: \
++	if (__dfd2 >= 0) \
++		sclib_file_put(&sclib_file, (fd2)); \
++__dfd2_err: \
++	if (__dfd1 >= 0) \
++		sclib_file_put(&sclib_file, (fd1)); \
++__dfd1_err: \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_LFD_SYSCALL_NOSTATUS(call, par, fd, ...) (__extension__ ({ \
++	INTERNAL_SYSCALL_DECL(__err); \
++	long __lfd = sclib_file_get(&sclib_file, (fd), SYSCALL_SYSID_LOCAL); \
++	if (unlikely(__lfd < 0)) \
++		return; \
++	INTERNAL_SYSCALL(call, __err, par, __lfd, ##__VA_ARGS__); \
++	sclib_file_put(&sclib_file, (fd)); \
++}))
++
++#define SCLIB_PATH_CALL(call, par, path, ...) (__extension__ ({ \
++	char __abspath[PATH_MAX], *__dpath; \
++	long __ret; \
++	int __sysid; \
++	void *__rbuf; \
++	size_t __sz; \
++	__dpath = sclib_get_path(__abspath, (path), &__sysid, &__sz); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		memcpy(__rbuf, __dpath, __sz); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, sclib_mem(__sysid, __rbuf), ##__VA_ARGS__); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dpath, ##__VA_ARGS__); \
++	} \
++error_mem: \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_PATH_INBUF_CALL(call, sz, par, path, buf, ...) (__extension__ ({ \
++	char __abspath[PATH_MAX], *__dpath; \
++	long __ret; \
++	int __sysid; \
++	void *__rbuf, *__off; \
++	size_t __sz1, __sz2; \
++    __dpath = sclib_get_path(__abspath, (path), &__sysid, &__sz2); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz1 = (sz); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		memcpy(mempcpy(__rbuf, (buf), __sz1), __dpath, __sz2); \
++		__off = sclib_mem(__sysid, __rbuf); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __off + __sz1, __off, ##__VA_ARGS__); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dpath, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_PATH_OUTBUF_CALL(call, sz, par, path, buf, ...) (__extension__ ({ \
++	char __abspath[PATH_MAX], *__dpath; \
++	long __ret; \
++	int __sysid; \
++	void *__rbuf, *__off; \
++	size_t __sz1, __sz2; \
++    __dpath = sclib_get_path(__abspath, (path), &__sysid, &__sz2); \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__sz1 = (sz); \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		memcpy(__rbuf + __sz1, __dpath, __sz2); \
++		__off = sclib_mem(__sysid, __rbuf); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __off + __sz1, __off, ##__VA_ARGS__); \
++		if (!SCLIB_IS_ERR(__ret)) \
++			memcpy((buf), __rbuf, __sz1); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dpath, (buf), ##__VA_ARGS__); \
++	} \
++error_mem: \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++static inline const char *sclib_get_link(const char *path, int *sysid)
++{
++	char ch;
++
++	if (*path == '/')
++	{
++		while (*(path + 1) == '/')
++			path++;
++		if (strncmp(path, SCLIB_STORAGE_PREFIX, sizeof(SCLIB_STORAGE_PREFIX) - 1) == 0) {
++			ch = path[sizeof(SCLIB_STORAGE_PREFIX) - 1];
++			if (ch == '\0' || ch == '/') {
++				*sysid = SYSCALL_SYSID_STORAGE;
++				return path + sizeof(SCLIB_STORAGE_PREFIX) - 1;
++			}
++		}
++		*sysid = SYSCALL_SYSID_LOCAL;
++	} else {
++		*sysid = SYSCALL_SYSID_ALL;
++	}
++	return path;
++}
++
++#define SCLIB_PATH_CALL2(call, par, oldpath, newpath, ...) (__extension__ ({ \
++	char __abspath1[PATH_MAX], *__dpath1, __abspath2[PATH_MAX], *__dpath2; \
++	long __ret; \
++	int __sysid, __sysid2; \
++	void *__rbuf, *__off; \
++	size_t __sz2, __sz1; \
++	__dpath1 = sclib_get_path(__abspath1, (oldpath), &__sysid, &__sz1); \
++	__dpath2 = sclib_get_path(__abspath2, (newpath), &__sysid2, &__sz2); \
++	if (__sysid != __sysid2) { \
++		__ret = -EINVAL; \
++		goto error_mem; \
++	} \
++	if (__sysid != SYSCALL_SYSID_LOCAL) { \
++		__rbuf = sclib_memory_alloc(&sclib_data[__sysid], __sz1 + __sz2); \
++		SCLIB_MEM_RET(__rbuf, __ret); \
++		memcpy(mempcpy(__rbuf, __dpath1, __sz1), __dpath2, __sz2); \
++		__off = sclib_mem(__sysid, __rbuf); \
++		__ret = SCLIB_REMOTE_CALL(__sysid, call, par, __off, __off + __sz1, ##__VA_ARGS__); \
++		sclib_memory_free(&sclib_data[__sysid], __rbuf); \
++	} else { \
++		__ret = SCLIB_LOCAL_CALL(call, par, __dpath1, __dpath2, ##__VA_ARGS__); \
++	} \
++error_mem: \
++	SCLIB_ERR_RET(__ret); \
++	__ret; }))
++
++#define SCLIB_LOCAL_CALL(call, num, ...) (__extension__ ({ \
++	INTERNAL_SYSCALL_DECL(__err); \
++	long __retval = INTERNAL_SYSCALL(call, __err, num, ##__VA_ARGS__); \
++	if (INTERNAL_SYSCALL_ERROR_P(__retval, __err)) \
++		__retval = -INTERNAL_SYSCALL_ERRNO(__retval, __err); \
++	__retval; }))
++
++#define SCLIB_ALL_SIMPLE_CALL(call, num, ...) (__extension__ ({				\
++	void *__pos[SYSCALL_SYSIDS];											\
++	long __lret, __rret;													\
++	size_t __i;																\
++	for (__i = 0; __i < SYSCALL_SYSIDS; __i++) {							\
++		__pos[__i] =														\
++			SCLIB_REMOTE_CALL_ASYNC(__i, call, num, ##__VA_ARGS__);			\
++	}																		\
++	__lret = SCLIB_LOCAL_CALL(call, num, ##__VA_ARGS__);					\
++	for (__i = 0; __i < SYSCALL_SYSIDS; __i++) {							\
++		__rret = SCLIB_REMOTE_CALL_RESULT(__i, call, __pos[__i]);			\
++		if (SCLIB_IS_ERR(__rret))											\
++			__lret = __rret;												\
++	}																		\
++	__lret; }))
++
++#define __SCLIB_REMOTE_ARGS0(e)
++#define __SCLIB_REMOTE_ARGS1(e, x0)	(e[0] = (long) (x0))
++#define __SCLIB_REMOTE_ARGS2(e, x0, x1)	\
++	__SCLIB_REMOTE_ARGS1(e, x0); e[1] = (long) (x1);
++#define __SCLIB_REMOTE_ARGS3(e, x0, x1, x2)	\
++	__SCLIB_REMOTE_ARGS2(e, x0, x1); e[2] = (long) (x2);
++#define __SCLIB_REMOTE_ARGS4(e, x0, x1, x2, x3)	\
++	__SCLIB_REMOTE_ARGS3(e, x0, x1, x2); e[3] = (long) (x3);
++#define __SCLIB_REMOTE_ARGS5(e, x0, x1, x2, x3, x4)	\
++	__SCLIB_REMOTE_ARGS4(e, x0, x1, x2, x3); e[4] = (long) (x4);
++#define __SCLIB_REMOTE_ARGS6(e, x0, x1, x2, x3, x4, x5)	\
++	__SCLIB_REMOTE_ARGS5(e, x0, x1, x2, x3, x4); e[5] = (long) (x5);
++
++#define __SCLIB_REMOTE_CALL(rwidth, sysid, call, num, ...) (__extension__ ({ \
++	syscall_entry_t *__entry = sclib_get_entry(&sclib_data[sysid]); \
++	__SCLIB_REMOTE_ARGS##num(__entry->args, ##__VA_ARGS__); \
++	__entry->pd = THREAD_SELF; \
++	__entry->task_id = sclib_thread.task_id; \
++	__entry->seq_num = sclib_thread.seq_num++; \
++	__entry->id = __NRR_##call; \
++	__entry->signal = 0; \
++	sclib_put_entry(sysid, __entry); \
++	sclib_get_result_##rwidth(&sclib_data[sysid].buffer->page, sysid, __entry); }))
++
++#define SCLIB_REMOTE_CALL_DW(...)	\
++	__SCLIB_REMOTE_CALL(dw, ##__VA_ARGS__)
++
++#define SCLIB_REMOTE_CALL(...)	\
++	__SCLIB_REMOTE_CALL(sw, ##__VA_ARGS__)
++
++#define SCLIB_REMOTE_CALL_ASYNC(sysid, call, num, ...) (__extension__ ({ \
++	syscall_entry_t *__entry = sclib_get_entry(&sclib_data[sysid]); \
++	__SCLIB_REMOTE_ARGS##num(__entry->args, ##__VA_ARGS__); \
++	__entry->pd = THREAD_SELF; \
++	__entry->task_id = sclib_thread.task_id; \
++	__entry->seq_num = sclib_thread.seq_num++; \
++	__entry->id = __NRR_##call;	\
++	__entry->signal = 0; \
++	sclib_put_entry(sysid, __entry); \
++	__entry; }))
++
++#define __SCLIB_REMOTE_CALL_RESULT(rwidth, sysid, call, __entry_ptr)	\
++	sclib_get_result_##rwidth(&sclib_data[sysid].buffer->page, sysid, __entry_ptr)
++
++#define SCLIB_REMOTE_CALL_RESULT_DW(sysid, call, __entry_ptr)	\
++	__SCLIB_REMOTE_CALL_RESULT(dw, sysid, call, __entry_ptr)
++
++#define SCLIB_REMOTE_CALL_RESULT(sysid, call, __entry_ptr)	\
++	__SCLIB_REMOTE_CALL_RESULT(sw, sysid, call, __entry_ptr)
++
++#define SCLIB_SYSID_CALL(sysid, ...) (__extension__ ({ \
++	long __r; \
++	if ((sysid) != SYSCALL_SYSID_LOCAL) \
++		__r = SCLIB_REMOTE_CALL(sysid, __VA_ARGS__); \
++	else \
++		__r = SCLIB_LOCAL_CALL(__VA_ARGS__); \
++	__r; }))
++
++#define SCLIB_SYSID_CALL_BUFFER(sysid, call, par, arg0, argb, ...) (__extension__ ({ \
++	long __r; \
++	if ((sysid) != SYSCALL_SYSID_LOCAL) \
++		__r = SCLIB_REMOTE_CALL(sysid, call, par, arg0, sclib_mem(sysid, argb), ##__VA_ARGS__); \
++	else \
++		__r = SCLIB_LOCAL_CALL(call, par, arg0, argb, ##__VA_ARGS__); \
++	__r; }))
++
++#define SCLIB_FILE_TABLE_LENGTH		1024
++#define SCLIB_FD_EXEC				0x01
++#define SCLIB_FD_TRAN				0x02
++
++#ifdef SYSCALL_DEBUG
++
++# define SCLIB_STRACE_DEBUG(fmt, ...) (__extension__ ({ \
++	char __buf[64];														\
++	size_t __num = snprintf(__buf, sizeof(__buf), (fmt), ##__VA_ARGS__);	\
++	if (__num > sizeof(__buf) - 1)											\
++		__num = sizeof(__buf) - 1;											\
++	SCLIB_LOCAL_CALL(write, 3, -1, __buf, __num);							\
++}))
++
++# define SCLIB_LOCK_CHECK_INIT	\
++	size_t __lock_check_counter = 500000;
++
++# define SCLIB_LOCK_CHECK_STEP					do {		\
++	if (--__lock_check_counter == 0) {						\
++		fprintf(stderr, "LOCKUP BUG: %s\n", __FUNCTION__);	\
++		SCLIB_STRACE_DEBUG("LOCKUP BUG: %s\n", __FUNCTION__);	\
++		_exit(1);											\
++	}														\
++} while (0);
++
++#else
++
++# define SCLIB_STRACE_DEBUG(fmt, ...)
++# define SCLIB_LOCK_CHECK_INIT
++# define SCLIB_LOCK_CHECK_STEP
++
++#endif
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef int16_t sclib_fd_t;
++
++typedef struct sclib_file_entry_s {
++	sclib_fd_t dfd;
++	sclib_fd_t aux[SYSCALL_SYSIDS];
++	uint8_t ectl_doms;
++	int8_t sysid;
++	uint8_t flags;
++	uint8_t _pad;
++	uint32_t counter;
++	uint32_t flags_counter;
++} sclib_file_entry_t;
++
++typedef struct sclib_file_table_s {
++	sclib_file_entry_t fds[SCLIB_FILE_TABLE_LENGTH];
++	unsigned long bitmap[SCLIB_FILE_TABLE_LENGTH / (sizeof(long) * 8)];
++	long fd[SYSCALL_SYSIDS];
++	char curdir[PATH_MAX];
++	size_t curdir_size;
++} sclib_file_table_t;
++
++void sclib_file_replace(sclib_file_table_t *file, long fd, long dfd, int sysid,
++	sclib_fd_t *aux);
++libc_hidden_proto(sclib_file_replace)
++
++long sclib_file_close(sclib_file_table_t *file, long fd);
++libc_hidden_proto(sclib_file_close)
++
++static inline long sclib_bitmap_find(unsigned long *bitmap, size_t size,
++	size_t start)
++{
++	unsigned long val;
++	size_t i, shift, mask = (sizeof(long) * 8) - 1;
++
++	i = (start & ~mask) / 8;
++	shift = start & mask;
++	if (!__builtin_constant_p(start) || shift) {
++		val = (*(unsigned long *) ((char *) bitmap + i)) & (ULONG_MAX << shift);
++		if (val != 0)
++			return __builtin_ctzl(val) + i * 8;
++		i += sizeof(long);
++	}
++
++	for (; i != size; i += sizeof(long)) {
++		val = *(unsigned long *) ((char *) bitmap + i);
++		if (val != 0)
++			return __builtin_ctzl(val) + i * 8;
++	}
++	return -EMFILE;
++}
++
++static inline void sclib_bitmap_toggle(unsigned long *bitmap, size_t pos)
++{
++	size_t i = pos / (sizeof(long) * 8);
++	size_t shift = pos % (sizeof(long) * 8);
++	__sync_fetch_and_xor(bitmap + i, 1UL << shift);
++}
++
++static inline bool sclib_replace_lock_fd(sclib_file_table_t *file, long fd)
++{
++	uint32_t val;
++	SCLIB_LOCK_CHECK_INIT
++	do {
++		SCLIB_LOCK_CHECK_STEP
++		val = __sync_val_compare_and_swap(&file->fds[fd].counter, 3, 1);
++		if (val == 0) {
++			if (__sync_bool_compare_and_swap(&file->fds[fd].counter, 0, 1))
++				return false;
++		}
++	} while (val != 3);
++
++	return true;
++}
++
++static inline void sclib_replace_unlock_fd(sclib_file_table_t *file, long fd)
++{
++	__sync_fetch_and_add(&file->fds[fd].counter, 2); /* Counter = 3 (ready) */
++}
++
++static inline bool sclib_incref_fd(sclib_file_table_t *file, long fd)
++{
++	uint32_t val;
++
++	/* Increment if file is in ready state */
++	do {
++		val = file->fds[fd].counter;
++		if (val <= 2)
++			return false;
++	} while (!__sync_bool_compare_and_swap(&file->fds[fd].counter, val, val + 1));
++	return true;
++}
++
++static inline void sclib_putref_fd(sclib_file_table_t *file, long fd, uint32_t step)
++{
++	if (__sync_sub_and_fetch(&file->fds[fd].counter, step) == 2) {
++		sclib_file_close(file, fd);
++		file->fds[fd].dfd = -1;
++		sclib_bitmap_toggle(file->bitmap, fd);
++		__sync_fetch_and_sub(&file->fds[fd].counter, 2);
++	}
++}
++
++static inline void sclib_write_lock_fd_flags(sclib_file_table_t *file, long fd)
++{
++	SCLIB_LOCK_CHECK_INIT
++	/* Move from ready state (1) to write state (0) */
++	while (!__sync_bool_compare_and_swap(&file->fds[fd].flags_counter, 1, 0)) {
++		SCLIB_LOCK_CHECK_STEP
++	}
++}
++
++static inline void sclib_write_unlock_fd_flags(sclib_file_table_t *file, long fd)
++{
++	__sync_fetch_and_add(&file->fds[fd].flags_counter, 1);
++}
++
++static inline void sclib_read_lock_fd_flags(sclib_file_table_t *file, long fd)
++{
++	uint32_t val;
++	SCLIB_LOCK_CHECK_INIT
++
++	/* Move from ready state (1) to read state (> 1) */
++	do {
++		SCLIB_LOCK_CHECK_STEP
++		val = file->fds[fd].flags_counter;
++	} while (val == 0 || !__sync_bool_compare_and_swap(&file->fds[fd].flags_counter, val, val + 1));
++}
++
++static inline void sclib_read_unlock_fd_flags(sclib_file_table_t *file, long fd)
++{
++	__sync_fetch_and_sub(&file->fds[fd].flags_counter, 1);
++}
++
++static inline long sclib_file_add(sclib_file_table_t *file,
++	unsigned long start_fd)
++{
++	long fd;
++	SCLIB_LOCK_CHECK_INIT
++
++	do {
++		SCLIB_LOCK_CHECK_STEP
++		/* Optimistic search */
++		fd = sclib_bitmap_find(file->bitmap, sizeof(file->bitmap), start_fd);
++		if (unlikely(fd < 0))
++			return fd;
++	} while (!__sync_bool_compare_and_swap(&file->fds[fd].counter, 0, 1));
++	sclib_bitmap_toggle(file->bitmap, fd);
++	return fd;
++}
++
++static inline sclib_fd_t *sclib_file_aux(sclib_file_table_t *file, long fd)
++{
++	return file->fds[fd].aux;
++}
++
++static inline void sclib_file_add_fail(sclib_file_table_t *file, long fd)
++{
++	sclib_bitmap_toggle(file->bitmap, fd); /* Cancel allocation */
++	__sync_fetch_and_sub(&file->fds[fd].counter, 1); /* Counter = 0 (free) */
++}
++
++static inline void sclib_file_add_ok(sclib_file_table_t *file, long fd, long dfd, int sysid, uint8_t flags, uint8_t ectl_doms)
++{
++	file->fds[fd].dfd = dfd;
++	file->fds[fd].sysid = sysid;
++	file->fds[fd].flags = flags;
++	file->fds[fd].ectl_doms = ectl_doms;
++	__sync_fetch_and_add(&file->fds[fd].counter, 2); /* Counter = 3 (ready) */
++}
++
++static inline void sclib_file_add_done(sclib_file_table_t *file, long fd, long dfd, int sysid, uint8_t flags, uint8_t ectl_doms)
++{
++	if (SCLIB_IS_ERR(dfd)) {
++		sclib_file_add_fail(file, fd);
++	} else {
++		sclib_file_add_ok(file, fd, dfd, sysid, flags, ectl_doms);
++	}
++}
++
++static inline long sclib_file_get(sclib_file_table_t *file, long fd, int sysid)
++{
++	int id;
++	long dfd;
++
++	if (unlikely((unsigned long) fd >= SCLIB_FILE_TABLE_LENGTH
++			|| !sclib_incref_fd(file, fd)))
++		return -EBADF;
++	id = file->fds[fd].sysid;
++	dfd = file->fds[fd].dfd;
++	if (unlikely(sysid != id)) {
++		sclib_putref_fd(file, fd, 1);
++		return -EINVAL;
++	}
++	return dfd;
++}
++
++static inline long sclib_file_getid(sclib_file_table_t *file, long fd, int *sysid)
++{
++	long dfd;
++
++	*sysid = SYSCALL_SYSID_LOCAL;
++	if (unlikely((unsigned long) fd >= SCLIB_FILE_TABLE_LENGTH
++			|| !sclib_incref_fd(file, fd)))
++		return -EBADF;
++	dfd = file->fds[fd].dfd;
++	*sysid = file->fds[fd].sysid;
++	return dfd;
++}
++
++static inline long sclib_file_touch(sclib_file_table_t *file, long fd, int *sysid)
++{
++	long dfd;
++
++	dfd = file->fds[fd].dfd;
++	*sysid = file->fds[fd].sysid;
++	return dfd;
++}
++
++static inline void sclib_file_put(sclib_file_table_t *file, long fd)
++{
++	sclib_putref_fd(file, fd, 1);
++}
++
++static inline void sclib_file_release(sclib_file_table_t *file, long fd)
++{
++	sclib_putref_fd(file, fd, 2);
++}
++
++static inline long sclib_file_reverse_lookup(sclib_file_table_t *file, unsigned long dfd)
++{
++	size_t fd;
++	int found = 0;
++
++	for (fd = 0; fd < SCLIB_FILE_TABLE_LENGTH; fd++) {
++		if (!sclib_incref_fd(file, fd))
++			continue;
++		if ((unsigned long) file->fds[fd].dfd == dfd)
++			found = 1;
++		sclib_putref_fd(file, fd, 1);
++		if (found)
++			return fd;
++	}
++	return -EINVAL;
++}
++
++struct sclib_memory_list_s;
++typedef struct sclib_memory_list_s sclib_memory_list_t;
++
++struct sclib_memory_list_s {
++	sclib_memory_list_t *pred;
++	sclib_memory_list_t *succ;
++};
++
++typedef struct sclib_buffer_s {
++	syscall_wake_page_t wake_page;
++	syscall_page_t page;
++	char data[0];
++} sclib_buffer_t;
++
++typedef struct sclib_data_s {
++	sclib_buffer_t *buffer;
++	long memoff;
++	sclib_memory_list_t memory;
++	char *map_start;
++	char *map_end;
++	unsigned long map_pos;
++	long sysid;
++} sclib_data_t;
++
++typedef struct sclib_thread_data {
++	long efd[SYSCALL_SYSIDS+1];
++	unsigned int task_id;
++	unsigned int seq_num;
++} sclib_thread_data_t;
++
++extern sclib_data_t sclib_data[SYSCALL_SYSIDS];
++libc_hidden_proto(sclib_data)
++
++typedef struct sclib_miscdata_s {
++	long membase;
++	long domfd;
++} sclib_miscdata_t;
++
++extern sclib_miscdata_t sclib_miscdata[SYSCALL_SYSIDS];
++libc_hidden_proto(sclib_miscdata)
++
++extern sclib_file_table_t sclib_file;
++libc_hidden_proto(sclib_file)
++
++#ifdef __UCLIBC_HAS_TLS__
++extern __thread sclib_thread_data_t sclib_thread;
++#else
++# error "Need TLS support for SCLIB thread data"
++#endif
++
++void *sclib_memory_alloc(sclib_data_t *data, size_t size);
++libc_hidden_proto(sclib_memory_alloc)
++
++void sclib_memory_free(sclib_data_t *data, void *addr);
++libc_hidden_proto(sclib_memory_free)
++
++ssize_t sclib_iovec_length(const struct iovec *iov, size_t count);
++libc_hidden_proto(sclib_iovec_length)
++
++void *sclib_copy_from_iovec(void *to, struct sclib_iovc *from, size_t count);
++libc_hidden_proto(sclib_copy_from_iovec)
++
++void sclib_copy_to_iovec(struct sclib_iovc *to, const void *from, size_t length);
++libc_hidden_proto(sclib_copy_to_iovec)
++
++struct msghdr *sclib_init_msghdr(struct msghdr *to, const struct msghdr *from,
++								 size_t total_iovlen, struct msghdr *rto);
++libc_hidden_proto(sclib_init_msghdr)
++
++void sclib_copy_from_msghdr(struct msghdr *to, const struct msghdr *msg,
++							 size_t total_iovlen);
++libc_hidden_proto(sclib_copy_from_msghdr)
++
++void sclib_copy_to_msghdr(struct msghdr *msg, const struct msghdr *from,
++						size_t length, size_t total_iovlen,
++						size_t controllen, size_t namelen);
++libc_hidden_proto(sclib_copy_to_msghdr)
++
++long sclib_copy_file(long in_dfd, __off_t *in_off, long out_dfd, __off_t *out_off, size_t len, int in_sysid, int out_sysid);
++libc_hidden_proto(sclib_copy_file)
++
++long sclib_copy64_file(long in_dfd, __off64_t *in_off, long out_dfd, __off64_t *out_off, size_t len, int in_sysid, int out_sysid);
++libc_hidden_proto(sclib_copy64_file)
++
++static inline syscall_entry_t *sclib_get_entry(sclib_data_t *data)
++{
++	SCLIB_LOCK_CHECK_INIT
++	syscall_page_t *page = &data->buffer->page;
++	size_t eidx;
++
++	while (1) {
++		SCLIB_LOCK_CHECK_STEP
++		eidx = syscall_stack_pop(page->next, &page->free_top, SYSCALL_MAX_ENTRIES);
++		if (unlikely(eidx == SYSCALL_ERROR_ENTRY)) {
++			fprintf(stderr, "ERROR: fatal (free) dequeue error!\n");
++			_exit(1);
++		}
++		if (eidx != SYSCALL_NULL_ENTRY)
++			return &page->entry[eidx];
++		sched_yield();
++	}
++}
++
++static inline void sclib_put_entry(int sysid, syscall_entry_t *entry)
++{
++	uint64_t running_threads;
++	syscall_wake_page_t *wake_page = &sclib_data[sysid].buffer->wake_page;
++	syscall_page_t *page = &sclib_data[sysid].buffer->page;
++
++	syscall_stack_push(page->next, &page->alloc_top, (size_t) (entry - page->entry));
++	/* Notify the other side if necessary */
++	running_threads = wake_page->running_threads;
++	if ((running_threads & (SYSCALL_WAKE_REQUESTED | SYSCALL_WAKE_IN_PROGRESS)) == SYSCALL_WAKE_REQUESTED)
++		SCLIB_LOCAL_CALL(ioctl, 3, sclib_miscdata[sysid].domfd, SYSCALL_DRIVER_IOCTL_WAKE, 0);
++}
++
++static inline void sclib_wait_efd(struct syscall_efd *param, long efd)
++{
++	uint64_t val;
++	size_t efd_num;
++
++	efd_num = param->efd_num;
++	if (efd_num == 0)
++		return;
++	if ((ssize_t) efd_num < 0) {
++		efd_num = SCLIB_LOCAL_CALL(syscall_service_notify, 1, param);
++		if (efd_num == 0)
++			return;
++	}
++
++	do {
++		if (SCLIB_LOCAL_CALL(read, 3, efd, &val, sizeof(uint64_t)) == sizeof(uint64_t))
++			efd_num--;
++	} while (efd_num != 0);
++}
++
++#define __SCLIB_DECLARE_GET_RESULT(rwidth, _type)						\
++static inline _type sclib_get_result_##rwidth(syscall_page_t *page,		\
++			int sysid, syscall_entry_t *entry)							\
++{																		\
++	_type ret;															\
++	__sclib_schedule(sysid, entry);										\
++	ret  = syscall_entry_result_##rwidth(entry);						\
++	syscall_stack_push(page->next, &page->free_top,						\
++		(size_t) (entry - page->entry));								\
++	return ret;															\
++}
++
++__SCLIB_DECLARE_GET_RESULT(sw, long)
++__SCLIB_DECLARE_GET_RESULT(dw, syscall_sdw_t)
++
++static inline void *sclib_mem(int sysid, void *addr)
++{
++	return (char *) addr + sclib_data[sysid].memoff;
++}
++
++static inline void *sclib_usermem(int sysid, void *addr)
++{
++	return (char *) addr - sclib_data[sysid].memoff;
++}
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* !_SCLIB_PUBLIC_H */
+diff -urN libaio-0.3.109/src/_syscall_defs.h libaio-0.3.109-new/src/_syscall_defs.h
+--- libaio-0.3.109/src/_syscall_defs.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/_syscall_defs.h	2013-09-23 23:41:27.425201882 -0400
+@@ -0,0 +1,53 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2013 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_DEFS_H
++#define _SYSCALL_COMMON_DEFS_H 1
++
++typedef struct syscall_ptr {
++	size_t index; /* Must be first! */
++	size_t stamp;
++} __attribute__ ((aligned(sizeof(size_t) * 2))) syscall_ptr_t;
++
++#define SYSCALL_NULL_ENTRY			(size_t) (-1L)
++#define SYSCALL_ERROR_ENTRY			(size_t) (-2L)
++#define SYSCALL_REPEAT_ENTRY		(size_t) (-3L)
++
++#define VOLATILE_READ(x)		(*(volatile __typeof__(x) *) &(x))
++#define VOLATILE_READ_FAULT(x) ({		\
++	__typeof__(x) __r;					\
++	if (__get_user(__r, &(x)) != 0)		\
++		goto error_fault;				\
++	__r;								\
++})
++
++#define VOLATILE_READ_FAULT_PTR(x) ({				\
++	__typeof__(x) __r;								\
++	if (__get_user(__r.index, &(x).index) != 0)		\
++		goto error_fault;							\
++	if (__get_user(__r.stamp, &(x).stamp) != 0)		\
++		goto error_fault;							\
++	__r;											\
++})
++
++#endif /* !_SYSCALL_COMMON_DEFS_H */
+diff -urN libaio-0.3.109/src/_syscall.h libaio-0.3.109-new/src/_syscall.h
+--- libaio-0.3.109/src/_syscall.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/_syscall.h	2013-09-23 23:39:33.713197167 -0400
+@@ -0,0 +1,243 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev <rnikola@vt.edu>
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_SYSCALL_H
++#define _SYSCALL_COMMON_SYSCALL_H 1
++
++#include "_syscall_defs.h"
++
++/* Hypercall parameters */
++#define SYSCALL_SERVICE_PREPARE			0
++#define SYSCALL_SERVICE_CANCEL			1
++#define SYSCALL_SERVICE_CONNECT			2
++#define SYSCALL_SERVICE_DISCONNECT		3
++#define SYSCALL_SERVICE_CLEANUP			4
++#define SYSCALL_SERVICE_REGISTER		5
++#define SYSCALL_SERVICE_UNREGISTER		6
++
++/* Syscall service states */
++#define SYSCALL_STATE_TERMINATED		0
++#define SYSCALL_STATE_RUNNING			(unsigned long) (LONG_MIN)
++
++/* Main ring buffer requests */
++#define SYSCALL_ACTION_INIT				0
++#define SYSCALL_ACTION_ADD				1
++#define SYSCALL_ACTION_REMOVE			2
++#define SYSCALL_ACTION_EXPAND_MAP		3
++#define SYSCALL_ACTION_SHRINK_MAP		4
++
++#define SYSCALL_PREALLOC_PROCESSES		8
++
++#define SYSCALL_SYSID_NETWORK			0
++#define SYSCALL_SYSID_STORAGE			1
++#define SYSCALL_SYSIDS					2
++
++#define SYSCALL_QUEUE_ORDER				3
++#define SYSCALL_QUEUE_PAGES				(1U << SYSCALL_QUEUE_ORDER)
++#define SYSCALL_CALL_PAGES				8
++#define SYSCALL_PAGES					(SYSCALL_CALL_PAGES + 1)
++#define SYSCALL_DATA_SHARED_PAGES		8192
++#define SYSCALL_TOTAL_SHARED_PAGES		(SYSCALL_PAGES + SYSCALL_DATA_SHARED_PAGES)
++#define SYSCALL_MAX_EXPAND_MAP_GREFS		80
++#define SYSCALL_MAX_GROUPS					16
++#define SYSCALL_FDTABLE_PATH				"/tmp/sclib_"
++
++#define SYSCALL_IOCTL_MAGIC					0x81
++#define SYSCALL_DRIVER_IOCTL_REGISTER		_IO(SYSCALL_IOCTL_MAGIC, 0)
++#define SYSCALL_DRIVER_IOCTL_EXPAND_BUFFER	_IO(SYSCALL_IOCTL_MAGIC, 1)
++#define SYSCALL_DRIVER_IOCTL_SHRINK_BUFFER	_IO(SYSCALL_IOCTL_MAGIC, 2)
++#define SYSCALL_DRIVER_IOCTL_WAKE			_IO(SYSCALL_IOCTL_MAGIC, 3)
++#define SYSCALL_SERVICE_IOCTL_CONNECT		_IO(SYSCALL_IOCTL_MAGIC, 8)
++#define SYSCALL_SERVICE_IOCTL_DISCONNECT	_IO(SYSCALL_IOCTL_MAGIC, 9)
++#define SYSCALL_SERVICE_IOCTL_CLEANUP		_IO(SYSCALL_IOCTL_MAGIC, 10)
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef struct syscall_connect {
++	uint32_t	domid;
++	uint32_t	main_port;
++	uint32_t	ring_port;
++	uint32_t	disconnect_port;
++	uint32_t	wake_port;
++	uint32_t	main_gref;
++	uint32_t	front_ring_gref;
++	uint32_t	back_ring_gref;
++	uint32_t	wake_gref;
++} syscall_connect_t;
++
++//#define SYSCALL_DEBUG
++
++#ifdef __KERNEL__
++
++#include <xen/interface/io/ring.h>
++
++typedef struct syscall_prealloc {
++	uint32_t	id;
++	uint32_t	gref[SYSCALL_CALL_PAGES];
++} syscall_prealloc_t;
++
++typedef struct syscall_prealloc_process {
++	syscall_ptr_t alloc_top;
++	syscall_ptr_t free_top;
++	size_t next[SYSCALL_PREALLOC_PROCESSES];
++	syscall_prealloc_t entry[SYSCALL_PREALLOC_PROCESSES];
++} syscall_prealloc_process_t;
++
++struct sccom_request_add {
++	uint32_t	id;
++	uint32_t	ptgid;
++	uint32_t	gref[SYSCALL_QUEUE_PAGES];
++	struct cred_move	cm;
++	gid_t	_pad[SYSCALL_MAX_GROUPS];	/* Groups for credentials */
++};
++
++struct sccom_request_memory {
++	uint32_t	num;
++};
++
++struct sccom_response {
++	uint32_t	tgid;
++	uint32_t	num;
++	union {
++		syscall_prealloc_t	prealloc[SYSCALL_PREALLOC_PROCESSES];
++		uint32_t			grefs[SYSCALL_MAX_EXPAND_MAP_GREFS];
++	};
++};
++
++struct sccom_request {
++	int			id;
++	uint32_t	tgid;
++	union {
++		struct sccom_request_add	add;
++		struct sccom_request_memory	mem;
++	};
++};
++
++struct screq_response {
++	int			id;
++	uint32_t	tgid;
++	uint32_t	pid;
++};
++
++struct screq_request {
++	char		pad[0]; /* Just a stub */
++};
++
++#define RING_FULL_RSP(_r)	\
++	(RING_SIZE(_r) - ((_r)->rsp_prod_pvt - (_r)->sring->rsp_event) == 1)
++
++DEFINE_RING_TYPES(sccom, struct sccom_request, struct sccom_response);
++DEFINE_RING_TYPES(screq, struct screq_request, struct screq_response);
++
++#ifdef SYSCALL_DEBUG
++# define SYSCALL_TRACE(fmt, ...)	printk(KERN_INFO "[SC-CALL:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++#else
++# define SYSCALL_TRACE(fmt, ...)
++#endif
++
++#define SYSCALL_WARNING(fmt, ...)		printk(KERN_WARNING "[SC-WARNING:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++
++#define SYSCALL_ERROR(fmt, ...)		printk(KERN_ERR "[SC-ERROR:%u:%u] " fmt, current->tgid, current->pid, ##__VA_ARGS__)
++
++#endif /* __KERNEL__ */
++
++#define SYSCALL_REQUEST_FD			0x7FFFFFFF
++#define SYSCALL_REQUEST_NOTIFY		0x7FFFFFFF
++#define SYSCALL_REQUEST_SIGNAL(x)	((x) | 0x80000000)
++
++#define SYSCALL_ENTRY_RQUEUE		0x80U
++#define SYSCALL_ENTRY_DONE			0xFFU
++
++/* Double word definition */
++#if defined(__x86_64__)
++typedef __int128_t syscall_sdw_t;
++typedef __uint128_t syscall_udw_t;
++# define SYSCALL_INT_PTR(x)				((int *) (x))	/* Little Endian */
++#elif defined(__i386__)
++typedef int64_t syscall_sdw_t;
++typedef uint64_t syscall_udw_t;
++# define SYSCALL_INT_PTR(x)				((int *) (x))	/* Little Endian */
++#endif
++
++#define syscall_entry_result_lower(x)	((x)->args[0])
++#define syscall_entry_result_upper(x)	((x)->args[1])
++
++#define syscall_entry_result_sw(x)		((x)->args[0])
++#define syscall_entry_result_dw(x)	\
++	(((syscall_udw_t) (x)->args[1] << (sizeof(long) * 8)) | (x)->args[0])
++
++#define syscall_result_lower(x)			((unsigned long) (x))
++#define syscall_result_upper(x)			((unsigned long) ((syscall_udw_t) (x) >> (sizeof(long) * 8)))
++
++struct pthread;
++
++typedef struct syscall_entry {
++	unsigned char id;
++	unsigned char signal;
++	unsigned short seq_num;
++	unsigned int task_id;
++	struct pthread *pd;
++	unsigned long args[6];
++} syscall_entry_t;
++
++#define SYSCALL_MAX_PTHREADS	((SYSCALL_QUEUE_PAGES * PAGE_SIZE - 4 * sizeof(syscall_ptr_t) - 2 * sizeof(long)) / (sizeof(syscall_ptr_t) + sizeof(void *)))
++#define SYSCALL_MAX_RQUEUE_SIZE	(SYSCALL_MAX_PTHREADS * (sizeof(syscall_ptr_t) + sizeof(void *)) + 4 * sizeof(syscall_ptr_t) + 2 * sizeof(long))
++
++struct syscall_queue {
++	syscall_ptr_t alloc_head;
++	syscall_ptr_t alloc_tail;
++	syscall_ptr_t free_head;
++	syscall_ptr_t free_tail;
++	syscall_ptr_t next[SYSCALL_MAX_PTHREADS];
++	void *entries[SYSCALL_MAX_PTHREADS];
++	unsigned long waiters;
++	unsigned long nkthreads;
++	char _pad[SYSCALL_QUEUE_PAGES * PAGE_SIZE - SYSCALL_MAX_RQUEUE_SIZE];
++};
++
++#define SYSCALL_MAX_ENTRIES		((SYSCALL_CALL_PAGES * PAGE_SIZE - 2 * sizeof(syscall_ptr_t)) / (sizeof(syscall_entry_t) + sizeof(size_t)))
++#define SYSCALL_MAX_CALL_SIZE	(SYSCALL_MAX_ENTRIES * sizeof(syscall_entry_t) + 2 * sizeof(syscall_ptr_t) + SYSCALL_MAX_ENTRIES * sizeof(size_t))
++
++typedef struct syscall_page {
++	syscall_entry_t	entry[SYSCALL_MAX_ENTRIES];
++	syscall_ptr_t alloc_top;
++	syscall_ptr_t free_top;
++	size_t next[SYSCALL_MAX_ENTRIES];
++	char _pad[SYSCALL_CALL_PAGES * PAGE_SIZE - SYSCALL_MAX_CALL_SIZE];
++} syscall_page_t;
++
++#define SYSCALL_WAKE_REQUESTED		0x100000000ULL
++#define SYSCALL_WAKE_IN_PROGRESS	0x80000000U
++
++typedef struct syscall_wake_page {
++	volatile uint64_t running_threads;
++	char _pad[PAGE_SIZE - sizeof(uint64_t)];
++} syscall_wake_page_t;
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* !_SYSCALL_COMMON_SYSCALL_H */
+diff -urN libaio-0.3.109/src/_syscall_num.h libaio-0.3.109-new/src/_syscall_num.h
+--- libaio-0.3.109/src/_syscall_num.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/_syscall_num.h	2013-09-23 23:39:33.713197167 -0400
+@@ -0,0 +1,139 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012 Ruslan Nikolaev
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_SYSCALL_NUM_H
++#define _SYSCALL_COMMON_SYSCALL_NUM_H 			1
++
++#define __NRR_socket							0
++#define __NRR_accept							1
++#define __NRR_accept4							2
++#define __NRR_bind								3
++#define __NRR_listen							4
++#define __NRR_connect							5
++#define __NRR_getsockname						6
++#define __NRR_getpeername						7
++#define __NRR_getsockopt						8
++#define __NRR_setsockopt						9
++#define __NRR_sendto							10
++#define __NRR_recvfrom							11
++#define __NRR_sendmsg							12
++#define __NRR_recvmsg							13
++#define __NRR_shutdown							14
++#define __NRR_uname								15
++#define __NRR_sethostname						16
++#define __NRR_setdomainname						17
++#define __NRR_read								18
++#define __NRR_write								19
++#define __NRR_pread64							20
++#define __NRR_pwrite64							21
++#define __NRR_splice							22
++#define __NRR_sendfile							23
++#define __NRR_fsync								24
++#define __NRR_fdatasync							25
++#define __NRR_flock								26
++#define __NRR_fadvise64							27
++#define __NRR_fstat								28
++#define __NRR_newfstatat						29
++#define __NRR_syscall_service_select			30
++#define __NRR_syscall_service_poll				31
++#define __NRR_syscall_service_epoll_wait		32
++#define __NRR_dup								33
++#define __NRR_close								34
++#define __NRR_fcntl								35
++#define __NRR_ioctl								36
++#define __NRR_syscall_service_init				37
++#define __NRR_eventfd							38
++#define __NRR_eventfd2							39
++#define __NRR_epoll_create						40
++#define __NRR_epoll_create1						41
++#define __NRR_epoll_ctl							42
++#define __NRR_io_setup							43
++#define __NRR_io_destroy						44
++#define __NRR_io_cancel							45
++#define __NRR_io_submit							46
++#define __NRR_setuid							47
++#define __NRR_setgid							48
++#define __NRR_setreuid							49
++#define __NRR_setregid							50
++#define __NRR_setresuid							51
++#define __NRR_setresgid							52
++#define __NRR_setgroups							53
++#define __NRR_capset							54
++#define __NRR_prctl								55
++#define __NRR_syscall_service_chdir				56
++#define __NRR_syscall_service_fchdir			57
++#define __NRR_symlink							58
++#define __NRR_readlink							59
++#define __NRR_link								60
++#define __NRR_rename							61
++#define __NRR_chmod								62
++#define __NRR_fchmod							63
++#define __NRR_truncate							64
++#define __NRR_ftruncate							65
++#define __NRR_stat								66
++#define __NRR_lstat								67
++#define __NRR_open								68
++#define __NRR_chown								69
++#define __NRR_fchown							70
++#define __NRR_lseek								71
++#define __NRR_statfs							72
++#define __NRR_fstatfs							73
++#define __NRR_unlink							74
++#define __NRR_mknod								75
++#define __NRR_mkdir								76
++#define __NRR_rmdir								77
++#define __NRR_faccessat							78
++#define __NRR_fchmodat							79
++#define __NRR_fchownat							80
++#define __NRR_futimesat							81
++#define __NRR_mkdirat							82
++#define __NRR_mknodat							83
++#define __NRR_unlinkat							84
++#define __NRR_readlinkat						85
++#define __NRR_symlinkat							86
++#define __NRR_linkat							87
++#define __NRR_renameat							88
++#define __NRR_utimensat							89
++#define __NRR_utime								90
++#define __NRR_utimes							91
++#define __NRR_access							92
++#define __NRR_removexattr						93
++#define __NRR_lremovexattr						94
++#define __NRR_fremovexattr						95
++#define __NRR_listxattr							96
++#define __NRR_llistxattr						97
++#define __NRR_flistxattr						98
++#define __NRR_getxattr							99
++#define __NRR_lgetxattr							100
++#define __NRR_fgetxattr							101
++#define __NRR_setxattr							102
++#define __NRR_lsetxattr							103
++#define __NRR_fsetxattr							104
++#define __NRR_lchown							105
++#define __NRR_getdents64						106
++
++/* Aliases */
++#define __NRR_fstatat64							__NRR_newfstatat
++#define __NRR_posix_fadvise						__NRR_fadvise64
++
++#endif /* !_SYSCALL_COMMON_SYSCALL_NUM_H */
+diff -urN libaio-0.3.109/src/_syscall_stack.h libaio-0.3.109-new/src/_syscall_stack.h
+--- libaio-0.3.109/src/_syscall_stack.h	1969-12-31 19:00:00.000000000 -0500
++++ libaio-0.3.109-new/src/_syscall_stack.h	2013-09-23 23:39:33.713197167 -0400
+@@ -0,0 +1,74 @@
++/**
++ * VM-Syscalls
++ * Copyright (c) 2012-2013 Ruslan Nikolaev
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
++ * IN THE SOFTWARE.
++ */
++
++#ifndef _SYSCALL_COMMON_SYSCALL_STACK_H
++#define _SYSCALL_COMMON_SYSCALL_STACK_H 1
++
++#include "_dcmpxchg.h"
++#include "_syscall_defs.h"
++
++/* This implements LIFO queue. */
++static inline void syscall_stack_push(size_t *next, syscall_ptr_t *top, size_t eidx)
++{
++	syscall_ptr_t prev_top;
++
++	do {
++		prev_top = VOLATILE_READ(*top);
++		next[eidx] = prev_top.index;
++	} while (!dcmpxchg(&top->index, prev_top.index, prev_top.stamp, eidx, prev_top.stamp + 1));
++}
++
++static inline size_t syscall_stack_pop(size_t *next, syscall_ptr_t *top, size_t max)
++{
++	syscall_ptr_t prev_top;
++	size_t next_top;
++
++	do {
++		prev_top = VOLATILE_READ(*top);
++		if (prev_top.index == SYSCALL_NULL_ENTRY) {
++			return SYSCALL_NULL_ENTRY;
++		}
++		if (unlikely(prev_top.index >= max)) {
++			return SYSCALL_ERROR_ENTRY;
++		}
++		next_top = VOLATILE_READ(next[prev_top.index]);
++	} while (!dcmpxchg(&top->index, prev_top.index, prev_top.stamp, next_top, prev_top.stamp + 1));
++
++	return prev_top.index;
++}
++
++static inline size_t syscall_stack_check(syscall_ptr_t *top, size_t max)
++{
++	syscall_ptr_t cur_top;
++
++	cur_top = VOLATILE_READ(*top);
++	if (cur_top.index == SYSCALL_NULL_ENTRY) {
++		return SYSCALL_NULL_ENTRY;
++	}
++	if (unlikely(cur_top.index >= max)) {
++		return SYSCALL_ERROR_ENTRY;
++	}
++	return 0;
++}
++
++#endif /* !_SYSCALL_COMMON_SYSCALL_STACK_H */
+diff -urN libaio-0.3.109/src/syscall-x86_64.h libaio-0.3.109-new/src/syscall-x86_64.h
+--- libaio-0.3.109/src/syscall-x86_64.h	2009-10-09 14:17:02.000000000 -0400
++++ libaio-0.3.109-new/src/syscall-x86_64.h	2013-09-23 23:43:51.693207864 -0400
+@@ -1,3 +1,19 @@
++#include "internal-syscall-x86_64.h"
++
++#define PAGE_SIZE			4096
++
++#define __NR_rqueue_wait_notify				312
++#define __NR_syscall_service_notify			313
++#define __NR_rqueue_wake					319
++#define __NR_rqueue_wait					320
++
++/* Taken from libpthread. */
++#define THREAD_SELF \
++  ({ void *__self;                                  \
++     __asm__ ("movq %%fs:%c1,%q0" : "=r" (__self)   \
++      : "i" (0));                                   \
++     __self;})
++
+ #define __NR_io_setup		206
+ #define __NR_io_destroy		207
+ #define __NR_io_getevents	208
