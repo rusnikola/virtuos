@@ -1,6 +1,6 @@
 diff -urN linux-3.2.30/arch/x86/ia32/ia32entry.S linux-3.2.30-new/arch/x86/ia32/ia32entry.S
 --- linux-3.2.30/arch/x86/ia32/ia32entry.S	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/ia32/ia32entry.S	2013-09-23 20:33:39.462208205 -0400
++++ linux-3.2.30-new/arch/x86/ia32/ia32entry.S	2013-11-27 16:38:32.525656784 -0500
 @@ -852,4 +852,13 @@
  	.quad sys_setns
  	.quad compat_sys_process_vm_readv
@@ -17,7 +17,7 @@ diff -urN linux-3.2.30/arch/x86/ia32/ia32entry.S linux-3.2.30-new/arch/x86/ia32/
  ia32_syscall_end:
 diff -urN linux-3.2.30/arch/x86/include/asm/processor.h linux-3.2.30-new/arch/x86/include/asm/processor.h
 --- linux-3.2.30/arch/x86/include/asm/processor.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/include/asm/processor.h	2013-09-23 20:33:39.462208205 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/processor.h	2013-11-27 16:38:32.529656785 -0500
 @@ -619,7 +619,8 @@
  }
  
@@ -30,7 +30,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/processor.h linux-3.2.30-new/arch/x8
  
 diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/include/asm/uaccess.h
 --- linux-3.2.30/arch/x86/include/asm/uaccess.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/include/asm/uaccess.h	2013-09-23 20:33:39.462208205 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/uaccess.h	2013-11-27 17:21:54.325764649 -0500
 @@ -1,3 +1,8 @@
 +/*
 + *	Modifications for VM-Syscalls
@@ -104,15 +104,17 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
  	flag;								\
  })
  
-@@ -218,6 +234,7 @@
+@@ -218,6 +234,9 @@
  #endif
  
  extern void __put_user_bad(void);
 +extern void __cmpxchg_user_bad(void);
++extern void __xadd_user_bad(void);
++extern void __add_user_bad(void);
  
  /*
   * Strange magic calling convention: pointer in %ecx,
-@@ -273,6 +290,46 @@
+@@ -273,6 +292,90 @@
  	__ret_pu;						\
  })
  
@@ -138,6 +140,50 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
 +	}								\
 +} while (0)
 +
++#define __xadd_user_size(r, x, ptr, size, retval, errret)			\
++do {									\
++	retval = 0;							\
++	__chk_user_ptr(ptr);						\
++	switch (size) {							\
++	case 1:								\
++		__xadd_user_asm(r, x, ptr, retval, "b", "b", errret);	\
++		break;							\
++	case 2:								\
++		__xadd_user_asm(r, x, ptr, retval, "w", "w", errret);	\
++		break;							\
++	case 4:								\
++		__xadd_user_asm(r, x, ptr, retval, "l", "k", errret);	\
++		break;							\
++	case 8:								\
++		__xadd_user_asm_u64(r, x, ptr, retval, "q", "", errret);	\
++		break;							\
++	default:							\
++		__xadd_user_bad();					\
++	}								\
++} while (0)
++
++#define __add_user_size(x, ptr, size, retval, errret)			\
++do {									\
++	retval = 0;							\
++	__chk_user_ptr(ptr);						\
++	switch (size) {							\
++	case 1:								\
++		__add_user_asm(x, ptr, retval, "b", "b", errret);	\
++		break;							\
++	case 2:								\
++		__add_user_asm(x, ptr, retval, "w", "w", errret);	\
++		break;							\
++	case 4:								\
++		__add_user_asm(x, ptr, retval, "l", "k", errret);	\
++		break;							\
++	case 8:								\
++		__add_user_asm_u64(x, ptr, retval, "q", "", errret);	\
++		break;							\
++	default:							\
++		__add_user_bad();					\
++	}								\
++} while (0)
++
 +#define __dcmpxchg_user_nosize(r, xlo, xhi, ylo, yhi, ptr, retval, errret) \
 +do {									\
 +	size_t __dx;						\
@@ -159,7 +205,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
  #define __put_user_size(x, ptr, size, retval, errret)			\
  do {									\
  	retval = 0;							\
-@@ -418,6 +475,20 @@
+@@ -418,6 +521,34 @@
  	__pu_err;						\
  })
  
@@ -168,6 +214,20 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
 +	int __cmpx_err;						\
 +	__cmpxchg_user_size((r), (x), (y), (ptr), (size), __cmpx_err, -EFAULT);	\
 +	__cmpx_err;						\
++})
++
++#define __xadd_user_nocheck(r, x, ptr, size)			\
++({								\
++	int __xadd_err;						\
++	__xadd_user_size((r), (x), (ptr), (size), __xadd_err, -EFAULT);	\
++	__xadd_err;						\
++})
++
++#define __add_user_nocheck(x, ptr, size)			\
++({								\
++	int __add_err;						\
++	__add_user_size((x), (ptr), (size), __add_err, -EFAULT);	\
++	__add_err;						\
 +})
 +
 +#define __dcmpxchg_user_nocheck(r, xlo, xhi, ylo, yhi, ptr)			\
@@ -180,7 +240,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
  #define __get_user_nocheck(x, ptr, size)				\
  ({									\
  	int __gu_err;							\
-@@ -431,6 +502,24 @@
+@@ -431,6 +562,52 @@
  struct __large_struct { unsigned long buf[100]; };
  #define __m(x) (*(struct __large_struct __user *)(x))
  
@@ -196,21 +256,55 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
 +		     : ltype(y), "i" (errret), "1" (x), "0" (err)	\
 +			 : "cc")
 +
++#define __xadd_user_asm(r, x, addr, err, itype, rtype, errret)	\
++	asm volatile("1:	lock; xadd"itype" %"rtype"3,%2\n"		\
++		     "2:\n"						\
++		     ".section .fixup,\"ax\"\n"				\
++		     "3:	mov %4,%0\n"				\
++		     "	jmp 2b\n"					\
++		     ".previous\n"					\
++		     _ASM_EXTABLE(1b, 3b)				\
++		     : "=r"(err), "=r" (r), "+m" (__m(addr))					\
++		     : "1" (x), "i" (errret), "0" (err)	\
++			 : "cc")
++
++#define __add_user_asm(x, addr, err, itype, rtype, errret)	\
++	asm volatile("1:	lock; add"itype" %"rtype"2,%1\n"		\
++		     "2:\n"						\
++		     ".section .fixup,\"ax\"\n"				\
++		     "3:	mov %3,%0\n"				\
++		     "	jmp 2b\n"					\
++		     ".previous\n"					\
++		     _ASM_EXTABLE(1b, 3b)				\
++		     : "=r"(err), "+m" (__m(addr))					\
++		     : "ir" (x), "i" (errret), "0" (err)	\
++			 : "cc")
++
 +#ifdef CONFIG_X86_32
 +# define __cmpxchg_user_asm_u64(...)	__cmpxchg_user_bad()
++# define __xadd_user_asm_u64(...)		__xadd_user_bad()
++# define __add_user_asm_u64(...)		__add_user_bad()
 +# else
 +# define __cmpxchg_user_asm_u64			__cmpxchg_user_asm
++# define __xadd_user_asm_u64			__xadd_user_asm
++# define __add_user_asm_u64				__add_user_asm
 +#endif
 +
  /*
   * Tell gcc we read from memory instead of writing: this is because
   * we do not write to any memory gcc knows about, so there are no
-@@ -513,6 +602,13 @@
+@@ -513,6 +690,19 @@
  #define __put_user(x, ptr)						\
  	__put_user_nocheck((__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
  
 +#define __cmpxchg_user(r, x, y, ptr)						\
 +	__cmpxchg_user_nocheck((__typeof__(*(ptr)))(r), (__typeof__(*(ptr)))(x), (__typeof__(*(ptr)))(y), (ptr), sizeof(*(ptr)))
++
++#define __xadd_user(r, x, ptr)						\
++	__xadd_user_nocheck((__typeof__(*(ptr)))(r), (__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
++
++#define __add_user(x, ptr)						\
++	__add_user_nocheck((__typeof__(*(ptr)))(x), (ptr), sizeof(*(ptr)))
 +
 +#define __dcmpxchg_user(r, xlo, xhi, ylo, yhi, ptr)						\
 +	__dcmpxchg_user_nocheck((r), (__typeof__(*(ptr)))(xlo), (__typeof__(*(ptr)))(xhi), (__typeof__(*(ptr)))(ylo), (__typeof__(*(ptr)))(yhi), (ptr))
@@ -221,7 +315,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/uaccess.h linux-3.2.30-new/arch/x86/
  
 diff -urN linux-3.2.30/arch/x86/include/asm/unistd_32.h linux-3.2.30-new/arch/x86/include/asm/unistd_32.h
 --- linux-3.2.30/arch/x86/include/asm/unistd_32.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/include/asm/unistd_32.h	2013-09-23 20:33:39.462208205 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/unistd_32.h	2013-11-27 16:38:32.529656785 -0500
 @@ -354,10 +354,19 @@
  #define __NR_setns		346
  #define __NR_process_vm_readv	347
@@ -245,7 +339,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/unistd_32.h linux-3.2.30-new/arch/x8
  #define __ARCH_WANT_OLD_READDIR
 diff -urN linux-3.2.30/arch/x86/include/asm/unistd_64.h linux-3.2.30-new/arch/x86/include/asm/unistd_64.h
 --- linux-3.2.30/arch/x86/include/asm/unistd_64.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/include/asm/unistd_64.h	2013-09-23 20:33:39.466208204 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/unistd_64.h	2013-11-27 16:38:32.529656785 -0500
 @@ -686,6 +686,24 @@
  __SYSCALL(__NR_process_vm_readv, sys_process_vm_readv)
  #define __NR_process_vm_writev			311
@@ -273,7 +367,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/unistd_64.h linux-3.2.30-new/arch/x8
  #define __ARCH_WANT_OLD_READDIR
 diff -urN linux-3.2.30/arch/x86/include/asm/xen/hypercall.h linux-3.2.30-new/arch/x86/include/asm/xen/hypercall.h
 --- linux-3.2.30/arch/x86/include/asm/xen/hypercall.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/include/asm/xen/hypercall.h	2013-09-23 20:33:39.466208204 -0400
++++ linux-3.2.30-new/arch/x86/include/asm/xen/hypercall.h	2013-11-27 16:38:32.533656785 -0500
 @@ -464,6 +464,13 @@
  	return _hypercall1(int, tmem_op, op);
  }
@@ -290,7 +384,7 @@ diff -urN linux-3.2.30/arch/x86/include/asm/xen/hypercall.h linux-3.2.30-new/arc
  {
 diff -urN linux-3.2.30/arch/x86/kernel/Makefile linux-3.2.30-new/arch/x86/kernel/Makefile
 --- linux-3.2.30/arch/x86/kernel/Makefile	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/kernel/Makefile	2013-09-23 20:33:39.466208204 -0400
++++ linux-3.2.30-new/arch/x86/kernel/Makefile	2013-11-27 16:38:32.533656785 -0500
 @@ -21,6 +21,7 @@
  obj-y			+= traps.o irq.o irq_$(BITS).o dumpstack_$(BITS).o
  obj-y			+= time.o ioport.o ldt.o dumpstack.o nmi.o
@@ -301,8 +395,8 @@ diff -urN linux-3.2.30/arch/x86/kernel/Makefile linux-3.2.30-new/arch/x86/kernel
  obj-$(CONFIG_X86_32)	+= sys_i386_32.o i386_ksyms_32.o
 diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x86/kernel/syscall_service.c
 --- linux-3.2.30/arch/x86/kernel/syscall_service.c	1969-12-31 19:00:00.000000000 -0500
-+++ linux-3.2.30-new/arch/x86/kernel/syscall_service.c	2013-09-23 20:33:39.466208204 -0400
-@@ -0,0 +1,282 @@
++++ linux-3.2.30-new/arch/x86/kernel/syscall_service.c	2013-11-27 17:40:56.305811992 -0500
+@@ -0,0 +1,303 @@
 +/**
 + * VM-Syscalls
 + * Copyright (c) 2012 Ruslan Nikolaev
@@ -363,7 +457,7 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x
 +	return 0;
 +}
 +
-+SYSCALL_DEFINE1(rqueue_wait, void __user **, ptr)
++SYSCALL_DEFINE2(rqueue_wait, struct __user syscall_queue *, queue, void __user **, ptr)
 +{
 +	struct task_struct *group = current->group_leader;
 +	struct syscall_queue *rqueue = group->rqueue;
@@ -371,7 +465,13 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x
 +	size_t idx;
 +	long err;
 +
++	if (unlikely(!access_ok(VERIFY_WRITE, queue, sizeof(struct syscall_queue))))
++		return -EINVAL;
++	if (unlikely(__add_user(1L, &queue->waiters)))
++		return -EFAULT;
 +	err = wait_event_interruptible(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++	if (unlikely(__add_user(-1L, &queue->waiters)))
++		return -EFAULT;
 +	if (!err) {
 +		if ((ssize_t) idx < 0 || put_user(result, ptr))
 +			return -EFAULT;
@@ -380,7 +480,7 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x
 +	return err;
 +}
 +
-+SYSCALL_DEFINE4(rqueue_wait_notify, int, sysid, unsigned char, id, struct syscall_entry __user *, entry, void __user **, ptr)
++SYSCALL_DEFINE5(rqueue_wait_notify, struct __user syscall_queue *, queue, int, sysid, unsigned char, id, struct syscall_entry __user *, entry, void __user **, ptr)
 +{
 +	struct task_struct *group = current->group_leader;
 +	struct syscall_queue *rqueue = group->rqueue;
@@ -389,21 +489,32 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x
 +	unsigned short seq_num;
 +	unsigned char val, id_notify = id + SYSCALL_ENTRY_RQUEUE;
 +	size_t idx;
++	long err;
 +	int signr;
 +
 +	if (unlikely((unsigned int) sysid >= SYSCALL_SYSIDS ||
-+		!access_ok(VERIFY_WRITE, entry, sizeof(struct syscall_entry)))) {
++		!access_ok(VERIFY_WRITE, entry, sizeof(struct syscall_entry)) ||
++		!access_ok(VERIFY_WRITE, queue, sizeof(struct syscall_queue)))) {
 +		return -EINVAL;
 +	}
 +	if (unlikely(__cmpxchg_user(val, id, id_notify, &entry->id)))
 +		return -EFAULT;
 +	if (val == SYSCALL_ENTRY_DONE) /* Result has been produced but not sent */
-+		return 0;
-+	if (wait_event_interruptible(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY)) {
++		return SYSCALL_MAX_PTHREADS;
++	if (unlikely(__add_user(1L, &queue->waiters)))
++		return -EFAULT;
++	err = wait_event_interruptible(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++	if (unlikely(__add_user(-1L, &queue->waiters)))
++		return -EFAULT;
++	if (err) {
 +		if (unlikely(__cmpxchg_user(val, id_notify, id, &entry->id)))
 +			return -EFAULT;
 +		if (val == SYSCALL_ENTRY_DONE) { /* Result has been just sent */
++			if (unlikely(__add_user(1L, &queue->waiters)))
++				return -EFAULT;
 +			wait_event_killable(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++			if (unlikely(__add_user(-1L, &queue->waiters)))
++				return -EFAULT;
 +			goto done;
 +		}
 +		if (unlikely(__get_user(seq_num, &entry->seq_num) != 0))
@@ -426,10 +537,14 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x
 +			if (unlikely(__cmpxchg_user(val, id, id_notify, &entry->id)))
 +				return -EFAULT;
 +			if (val != SYSCALL_ENTRY_DONE) { /* Result has not been produced */
++				if (unlikely(__add_user(1L, &queue->waiters)))
++					return -EFAULT;
 +				wait_event_killable(group->rqueue_wq, (idx = syscall_queue_dequeue(rqueue->next, rqueue->entries, &rqueue->alloc_head, &rqueue->alloc_tail, &result, SYSCALL_MAX_PTHREADS, 0)) != SYSCALL_NULL_ENTRY);
++				if (unlikely(__add_user(-1L, &queue->waiters)))
++					return -EFAULT;
 +				goto done;
 +			}
-+			return SYSCALL_NULL_ENTRY;
++			return SYSCALL_MAX_PTHREADS;
 +		}
 +		return -ERESTARTSYS;
 +	}
@@ -587,7 +702,7 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_service.c linux-3.2.30-new/arch/x
 +}
 diff -urN linux-3.2.30/arch/x86/kernel/syscall_table_32.S linux-3.2.30-new/arch/x86/kernel/syscall_table_32.S
 --- linux-3.2.30/arch/x86/kernel/syscall_table_32.S	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/kernel/syscall_table_32.S	2013-09-23 20:33:39.466208204 -0400
++++ linux-3.2.30-new/arch/x86/kernel/syscall_table_32.S	2013-11-27 16:38:32.533656785 -0500
 @@ -348,3 +348,12 @@
  	.long sys_setns
  	.long sys_process_vm_readv
@@ -603,7 +718,7 @@ diff -urN linux-3.2.30/arch/x86/kernel/syscall_table_32.S linux-3.2.30-new/arch/
 +	.long sys_rqueue_wait
 diff -urN linux-3.2.30/arch/x86/kernel/x8664_ksyms_64.c linux-3.2.30-new/arch/x86/kernel/x8664_ksyms_64.c
 --- linux-3.2.30/arch/x86/kernel/x8664_ksyms_64.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/arch/x86/kernel/x8664_ksyms_64.c	2013-09-23 20:33:39.466208204 -0400
++++ linux-3.2.30-new/arch/x86/kernel/x8664_ksyms_64.c	2013-11-27 16:38:32.533656785 -0500
 @@ -3,6 +3,7 @@
  
  #include <linux/module.h>
@@ -732,7 +847,7 @@ diff -urN linux-3.2.30/arch/x86/kernel/x8664_ksyms_64.c linux-3.2.30-new/arch/x8
   * but gcc sometimes decides not to inline them.
 diff -urN linux-3.2.30/fs/aio.c linux-3.2.30-new/fs/aio.c
 --- linux-3.2.30/fs/aio.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/aio.c	2013-09-23 20:33:39.466208204 -0400
++++ linux-3.2.30-new/fs/aio.c	2013-11-27 16:38:32.537656784 -0500
 @@ -6,6 +6,9 @@
   *
   *	Copyright 2000, 2001, 2002 Red Hat, Inc.  All Rights Reserved.
@@ -754,7 +869,7 @@ diff -urN linux-3.2.30/fs/aio.c linux-3.2.30-new/fs/aio.c
  	}
 diff -urN linux-3.2.30/fs/eventpoll.c linux-3.2.30-new/fs/eventpoll.c
 --- linux-3.2.30/fs/eventpoll.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/eventpoll.c	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/fs/eventpoll.c	2013-11-27 16:38:32.537656784 -0500
 @@ -2,6 +2,9 @@
   *  fs/eventpoll.c (Efficient event retrieval implementation)
   *  Copyright (C) 2001,...,2009	 Davide Libenzi
@@ -894,7 +1009,7 @@ diff -urN linux-3.2.30/fs/eventpoll.c linux-3.2.30-new/fs/eventpoll.c
   * part of the user space epoll_wait(2).
 diff -urN linux-3.2.30/fs/fcntl.c linux-3.2.30-new/fs/fcntl.c
 --- linux-3.2.30/fs/fcntl.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/fcntl.c	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/fs/fcntl.c	2013-11-27 16:38:32.537656784 -0500
 @@ -835,14 +835,14 @@
  	 * Exceptions: O_NONBLOCK is a two bit define on parisc; O_NDELAY
  	 * is defined as O_NONBLOCK on some platforms and not on others.
@@ -914,7 +1029,7 @@ diff -urN linux-3.2.30/fs/fcntl.c linux-3.2.30-new/fs/fcntl.c
  	fasync_cache = kmem_cache_create("fasync_cache",
 diff -urN linux-3.2.30/fs/file.c linux-3.2.30-new/fs/file.c
 --- linux-3.2.30/fs/file.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/file.c	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/fs/file.c	2013-11-27 16:38:32.537656784 -0500
 @@ -396,6 +396,8 @@
  	return NULL;
  }
@@ -926,7 +1041,7 @@ diff -urN linux-3.2.30/fs/file.c linux-3.2.30-new/fs/file.c
  	struct fdtable_defer *fddef = &per_cpu(fdtable_defer_list, cpu);
 diff -urN linux-3.2.30/fs/file_table.c linux-3.2.30-new/fs/file_table.c
 --- linux-3.2.30/fs/file_table.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/file_table.c	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/fs/file_table.c	2013-11-27 16:38:32.537656784 -0500
 @@ -275,8 +275,15 @@
  
  struct file *fget(unsigned int fd)
@@ -955,7 +1070,7 @@ diff -urN linux-3.2.30/fs/file_table.c linux-3.2.30-new/fs/file_table.c
  {
 diff -urN linux-3.2.30/fs/namei.c linux-3.2.30-new/fs/namei.c
 --- linux-3.2.30/fs/namei.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/namei.c	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/fs/namei.c	2013-11-27 16:38:32.537656784 -0500
 @@ -14,6 +14,11 @@
  /* [Feb-Apr 2000, AV] Rewrite to the new namespace architecture.
   */
@@ -991,7 +1106,7 @@ diff -urN linux-3.2.30/fs/namei.c linux-3.2.30-new/fs/namei.c
  	} else if (!retval)
 diff -urN linux-3.2.30/fs/open.c linux-3.2.30-new/fs/open.c
 --- linux-3.2.30/fs/open.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/fs/open.c	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/fs/open.c	2013-11-27 16:38:32.541656784 -0500
 @@ -4,6 +4,11 @@
   *  Copyright (C) 1991, 1992  Linus Torvalds
   */
@@ -1092,7 +1207,7 @@ diff -urN linux-3.2.30/fs/open.c linux-3.2.30-new/fs/open.c
  	struct path path;
 diff -urN linux-3.2.30/include/asm-generic/fcntl.h linux-3.2.30-new/include/asm-generic/fcntl.h
 --- linux-3.2.30/include/asm-generic/fcntl.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/asm-generic/fcntl.h	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/include/asm-generic/fcntl.h	2013-11-27 16:38:32.541656784 -0500
 @@ -84,6 +84,10 @@
  #define O_PATH		010000000
  #endif
@@ -1106,7 +1221,7 @@ diff -urN linux-3.2.30/include/asm-generic/fcntl.h linux-3.2.30-new/include/asm-
  #endif
 diff -urN linux-3.2.30/include/linux/cred.h linux-3.2.30-new/include/linux/cred.h
 --- linux-3.2.30/include/linux/cred.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/cred.h	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/include/linux/cred.h	2013-11-27 16:38:32.541656784 -0500
 @@ -3,6 +3,9 @@
   * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
   * Written by David Howells (dhowells@redhat.com)
@@ -1177,7 +1292,7 @@ diff -urN linux-3.2.30/include/linux/cred.h linux-3.2.30-new/include/linux/cred.
  /**
 diff -urN linux-3.2.30/include/linux/_dcmpxchg.h linux-3.2.30-new/include/linux/_dcmpxchg.h
 --- linux-3.2.30/include/linux/_dcmpxchg.h	1969-12-31 19:00:00.000000000 -0500
-+++ linux-3.2.30-new/include/linux/_dcmpxchg.h	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/include/linux/_dcmpxchg.h	2013-11-27 16:38:32.541656784 -0500
 @@ -0,0 +1,30 @@
 +#ifndef _SYSCALL_COMMON_DCMPXCHG_H
 +#define _SYSCALL_COMMON_DCMPXCHG_H 1
@@ -1211,7 +1326,7 @@ diff -urN linux-3.2.30/include/linux/_dcmpxchg.h linux-3.2.30-new/include/linux/
 +#endif /* !_SYSCALL_COMMON_DCMPXCHG */
 diff -urN linux-3.2.30/include/linux/eventpoll.h linux-3.2.30-new/include/linux/eventpoll.h
 --- linux-3.2.30/include/linux/eventpoll.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/eventpoll.h	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/include/linux/eventpoll.h	2013-11-27 16:38:32.541656784 -0500
 @@ -26,6 +26,9 @@
  #define EPOLL_CTL_DEL 2
  #define EPOLL_CTL_MOD 3
@@ -1232,7 +1347,7 @@ diff -urN linux-3.2.30/include/linux/eventpoll.h linux-3.2.30-new/include/linux/
  
 diff -urN linux-3.2.30/include/linux/file.h linux-3.2.30-new/include/linux/file.h
 --- linux-3.2.30/include/linux/file.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/file.h	2013-09-23 20:33:39.470208204 -0400
++++ linux-3.2.30-new/include/linux/file.h	2013-11-27 16:38:32.541656784 -0500
 @@ -10,6 +10,7 @@
  #include <linux/posix_types.h>
  
@@ -1251,7 +1366,7 @@ diff -urN linux-3.2.30/include/linux/file.h linux-3.2.30-new/include/linux/file.
  extern struct file *fget_raw_light(unsigned int fd, int *fput_needed);
 diff -urN linux-3.2.30/include/linux/init_task.h linux-3.2.30-new/include/linux/init_task.h
 --- linux-3.2.30/include/linux/init_task.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/init_task.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/init_task.h	2013-11-27 16:38:32.541656784 -0500
 @@ -203,6 +203,8 @@
  		[PIDTYPE_SID]  = INIT_PID_LINK(PIDTYPE_SID),		\
  	},								\
@@ -1271,7 +1386,7 @@ diff -urN linux-3.2.30/include/linux/init_task.h linux-3.2.30-new/include/linux/
  	LIST_HEAD_INIT(cpu_timers[0]),					\
 diff -urN linux-3.2.30/include/linux/kthread.h linux-3.2.30-new/include/linux/kthread.h
 --- linux-3.2.30/include/linux/kthread.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/kthread.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/kthread.h	2013-11-27 16:38:32.541656784 -0500
 @@ -10,6 +10,11 @@
  					   int node,
  					   const char namefmt[], ...);
@@ -1294,7 +1409,7 @@ diff -urN linux-3.2.30/include/linux/kthread.h linux-3.2.30-new/include/linux/kt
  
 diff -urN linux-3.2.30/include/linux/net.h linux-3.2.30-new/include/linux/net.h
 --- linux-3.2.30/include/linux/net.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/net.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/net.h	2013-11-27 16:38:32.541656784 -0500
 @@ -109,6 +109,7 @@
  #ifndef SOCK_NONBLOCK
  #define SOCK_NONBLOCK	O_NONBLOCK
@@ -1305,7 +1420,7 @@ diff -urN linux-3.2.30/include/linux/net.h linux-3.2.30-new/include/linux/net.h
  
 diff -urN linux-3.2.30/include/linux/sched.h linux-3.2.30-new/include/linux/sched.h
 --- linux-3.2.30/include/linux/sched.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/sched.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/sched.h	2013-11-27 16:38:32.541656784 -0500
 @@ -1,3 +1,8 @@
 +/*
 + *	Modifications for VM-Syscalls
@@ -1364,7 +1479,7 @@ diff -urN linux-3.2.30/include/linux/sched.h linux-3.2.30-new/include/linux/sche
  /* Future-safe accessor for struct task_struct's cpus_allowed. */
 diff -urN linux-3.2.30/include/linux/_syscall_defs.h linux-3.2.30-new/include/linux/_syscall_defs.h
 --- linux-3.2.30/include/linux/_syscall_defs.h	1969-12-31 19:00:00.000000000 -0500
-+++ linux-3.2.30-new/include/linux/_syscall_defs.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/_syscall_defs.h	2013-11-27 16:38:32.541656784 -0500
 @@ -0,0 +1,53 @@
 +/**
 + * VM-Syscalls
@@ -1421,7 +1536,7 @@ diff -urN linux-3.2.30/include/linux/_syscall_defs.h linux-3.2.30-new/include/li
 +#endif /* !_SYSCALL_COMMON_DEFS_H */
 diff -urN linux-3.2.30/include/linux/_syscall.h linux-3.2.30-new/include/linux/_syscall.h
 --- linux-3.2.30/include/linux/_syscall.h	1969-12-31 19:00:00.000000000 -0500
-+++ linux-3.2.30-new/include/linux/_syscall.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/_syscall.h	2013-11-27 16:38:32.541656784 -0500
 @@ -0,0 +1,243 @@
 +/**
 + * VM-Syscalls
@@ -1668,7 +1783,7 @@ diff -urN linux-3.2.30/include/linux/_syscall.h linux-3.2.30-new/include/linux/_
 +#endif /* !_SYSCALL_COMMON_SYSCALL_H */
 diff -urN linux-3.2.30/include/linux/_syscall_queue.h linux-3.2.30-new/include/linux/_syscall_queue.h
 --- linux-3.2.30/include/linux/_syscall_queue.h	1969-12-31 19:00:00.000000000 -0500
-+++ linux-3.2.30-new/include/linux/_syscall_queue.h	2013-09-23 21:05:51.186288289 -0400
++++ linux-3.2.30-new/include/linux/_syscall_queue.h	2013-11-27 16:38:32.541656784 -0500
 @@ -0,0 +1,237 @@
 +/**
 + * VM-Syscalls
@@ -1909,7 +2024,7 @@ diff -urN linux-3.2.30/include/linux/_syscall_queue.h linux-3.2.30-new/include/l
 +#endif /* !_SYSCALL_COMMON_SYSCALL_QUEUE_H */
 diff -urN linux-3.2.30/include/linux/syscall_service.h linux-3.2.30-new/include/linux/syscall_service.h
 --- linux-3.2.30/include/linux/syscall_service.h	1969-12-31 19:00:00.000000000 -0500
-+++ linux-3.2.30-new/include/linux/syscall_service.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/syscall_service.h	2013-11-27 16:38:32.541656784 -0500
 @@ -0,0 +1,42 @@
 +/**
 + * VM-Syscalls
@@ -1955,7 +2070,7 @@ diff -urN linux-3.2.30/include/linux/syscall_service.h linux-3.2.30-new/include/
 +
 diff -urN linux-3.2.30/include/linux/syscalls.h linux-3.2.30-new/include/linux/syscalls.h
 --- linux-3.2.30/include/linux/syscalls.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/syscalls.h	2013-09-23 20:33:39.474208205 -0400
++++ linux-3.2.30-new/include/linux/syscalls.h	2013-11-27 17:34:42.745796507 -0500
 @@ -63,6 +63,9 @@
  struct old_linux_dirent;
  struct perf_event_attr;
@@ -1970,7 +2085,7 @@ diff -urN linux-3.2.30/include/linux/syscalls.h linux-3.2.30-new/include/linux/s
  				      unsigned long riovcnt,
  				      unsigned long flags);
  
-+asmlinkage long sys_rqueue_wait_notify(int sysid, unsigned char id, struct syscall_entry __user * entry, void __user ** ptr);
++asmlinkage long sys_rqueue_wait_notify(struct syscall_queue __user *queue, int sysid, unsigned char id, struct syscall_entry __user *entry, void __user **ptr);
 +asmlinkage long sys_syscall_service_select(struct syscall_efd __user *ptr,
 +	fd_set __user *inp, fd_set __user *outp, fd_set __user *exp,
 +	struct timeval __user *tvp);
@@ -1982,12 +2097,12 @@ diff -urN linux-3.2.30/include/linux/syscalls.h linux-3.2.30-new/include/linux/s
 +asmlinkage long sys_syscall_service_chdir(const char __user *filename, char __user *buf, size_t len);
 +asmlinkage long sys_syscall_service_fchdir(unsigned int fd, char __user *buf, size_t len);
 +asmlinkage long sys_rqueue_wake(unsigned long nr);
-+asmlinkage long sys_rqueue_wait(void __user **ptr);
++asmlinkage long sys_rqueue_wait(struct syscall_queue __user *queue, void __user **ptr);
 +
  #endif
 diff -urN linux-3.2.30/include/linux/vmalloc.h linux-3.2.30-new/include/linux/vmalloc.h
 --- linux-3.2.30/include/linux/vmalloc.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/vmalloc.h	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/include/linux/vmalloc.h	2013-11-27 16:38:32.541656784 -0500
 @@ -99,6 +99,8 @@
  #ifdef CONFIG_MMU
  extern int map_kernel_range_noflush(unsigned long start, unsigned long size,
@@ -2012,7 +2127,7 @@ diff -urN linux-3.2.30/include/linux/vmalloc.h linux-3.2.30-new/include/linux/vm
  {
 diff -urN linux-3.2.30/include/linux/wait.h linux-3.2.30-new/include/linux/wait.h
 --- linux-3.2.30/include/linux/wait.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/linux/wait.h	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/include/linux/wait.h	2013-11-27 16:38:32.545656785 -0500
 @@ -1,3 +1,8 @@
 +/*
 + *	Modifications for VM-Syscalls
@@ -2058,7 +2173,7 @@ diff -urN linux-3.2.30/include/linux/wait.h linux-3.2.30-new/include/linux/wait.
  	DEFINE_WAIT(__wait);						\
 diff -urN linux-3.2.30/include/xen/interface/xen.h linux-3.2.30-new/include/xen/interface/xen.h
 --- linux-3.2.30/include/xen/interface/xen.h	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/include/xen/interface/xen.h	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/include/xen/interface/xen.h	2013-11-27 16:38:32.545656785 -0500
 @@ -59,6 +59,7 @@
  #define __HYPERVISOR_physdev_op           33
  #define __HYPERVISOR_hvm_op               34
@@ -2069,7 +2184,7 @@ diff -urN linux-3.2.30/include/xen/interface/xen.h linux-3.2.30-new/include/xen/
  #define __HYPERVISOR_arch_0               48
 diff -urN linux-3.2.30/kernel/cred.c linux-3.2.30-new/kernel/cred.c
 --- linux-3.2.30/kernel/cred.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/cred.c	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/kernel/cred.c	2013-11-27 16:38:32.545656785 -0500
 @@ -3,6 +3,9 @@
   * Copyright (C) 2008 Red Hat, Inc. All Rights Reserved.
   * Written by David Howells (dhowells@redhat.com)
@@ -2252,7 +2367,7 @@ diff -urN linux-3.2.30/kernel/cred.c linux-3.2.30-new/kernel/cred.c
   * abort_creds - Discard a set of credentials and unlock the current task
 diff -urN linux-3.2.30/kernel/exit.c linux-3.2.30-new/kernel/exit.c
 --- linux-3.2.30/kernel/exit.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/exit.c	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/kernel/exit.c	2013-11-27 16:38:32.545656785 -0500
 @@ -521,6 +521,8 @@
  	}
  }
@@ -2264,7 +2379,7 @@ diff -urN linux-3.2.30/kernel/exit.c linux-3.2.30-new/kernel/exit.c
  	struct task_struct *tsk = current;
 diff -urN linux-3.2.30/kernel/fork.c linux-3.2.30-new/kernel/fork.c
 --- linux-3.2.30/kernel/fork.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/fork.c	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/kernel/fork.c	2013-11-27 16:38:32.545656785 -0500
 @@ -5,6 +5,11 @@
   */
  
@@ -2320,7 +2435,7 @@ diff -urN linux-3.2.30/kernel/fork.c linux-3.2.30-new/kernel/fork.c
  	exit_creds(p);
 diff -urN linux-3.2.30/kernel/kthread.c linux-3.2.30-new/kernel/kthread.c
 --- linux-3.2.30/kernel/kthread.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/kthread.c	2013-09-23 20:33:39.478208207 -0400
++++ linux-3.2.30-new/kernel/kthread.c	2013-11-27 16:38:32.545656785 -0500
 @@ -1,6 +1,9 @@
  /* Kernel thread helper functions.
   *   Copyright (C) 2004 IBM Corporation, Rusty Russell.
@@ -2419,7 +2534,7 @@ diff -urN linux-3.2.30/kernel/kthread.c linux-3.2.30-new/kernel/kthread.c
  	struct task_struct *tsk = current;
 diff -urN linux-3.2.30/kernel/sched.c linux-3.2.30-new/kernel/sched.c
 --- linux-3.2.30/kernel/sched.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/sched.c	2013-09-23 20:33:39.482208208 -0400
++++ linux-3.2.30-new/kernel/sched.c	2013-11-27 16:38:32.545656785 -0500
 @@ -26,6 +26,11 @@
   *              Thomas Gleixner, Mike Kravetz
   */
@@ -2466,7 +2581,7 @@ diff -urN linux-3.2.30/kernel/sched.c linux-3.2.30-new/kernel/sched.c
  static inline bool owner_running(struct mutex *lock, struct task_struct *owner)
 diff -urN linux-3.2.30/kernel/signal.c linux-3.2.30-new/kernel/signal.c
 --- linux-3.2.30/kernel/signal.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/signal.c	2013-09-23 20:33:39.482208208 -0400
++++ linux-3.2.30-new/kernel/signal.c	2013-11-27 16:38:32.549656786 -0500
 @@ -207,6 +207,8 @@
  	return sig;
  }
@@ -2487,7 +2602,7 @@ diff -urN linux-3.2.30/kernel/signal.c linux-3.2.30-new/kernel/signal.c
   * Returns 1 if any signals were found.
 diff -urN linux-3.2.30/kernel/user.c linux-3.2.30-new/kernel/user.c
 --- linux-3.2.30/kernel/user.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/kernel/user.c	2013-09-23 20:33:39.482208208 -0400
++++ linux-3.2.30-new/kernel/user.c	2013-11-27 16:38:32.549656786 -0500
 @@ -121,6 +121,7 @@
  	spin_unlock_irqrestore(&uidhash_lock, flags);
  	return ret;
@@ -2514,7 +2629,7 @@ diff -urN linux-3.2.30/kernel/user.c linux-3.2.30-new/kernel/user.c
  {
 diff -urN linux-3.2.30/mm/vmalloc.c linux-3.2.30-new/mm/vmalloc.c
 --- linux-3.2.30/mm/vmalloc.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/mm/vmalloc.c	2013-09-23 20:33:39.482208208 -0400
++++ linux-3.2.30-new/mm/vmalloc.c	2013-11-27 16:38:32.549656786 -0500
 @@ -1196,6 +1196,7 @@
  {
  	return vmap_page_range_noflush(addr, addr + size, prot, pages);
@@ -2546,7 +2661,7 @@ diff -urN linux-3.2.30/mm/vmalloc.c linux-3.2.30-new/mm/vmalloc.c
  struct vm_struct *vmlist;
 diff -urN linux-3.2.30/net/socket.c linux-3.2.30-new/net/socket.c
 --- linux-3.2.30/net/socket.c	2012-09-19 10:05:26.000000000 -0400
-+++ linux-3.2.30-new/net/socket.c	2013-09-23 20:33:39.482208208 -0400
++++ linux-3.2.30-new/net/socket.c	2013-11-27 16:38:32.549656786 -0500
 @@ -58,6 +58,11 @@
   *	Based upon Swansea University Computer Society NET3.039
   */

@@ -2,9 +2,9 @@
 
 Copyright (C) 2012-2013 Ruslan Nikolaev
 
-**_Note: It was last released in 2013; I mirrored it here on the GitHub._**
+**_Note: It was last released in 2013; I mirrored it here on GitHub._**
 
-VirtuOS R1 requires Linux 3.2.30, Xen 4.2.0, uClibc 0.9.33, and libaio 0.3.109. VirtuOS requires x86\_64 installation.
+VirtuOS R1.0x requires Linux 3.2.30, Xen 4.2.0, uClibc 0.9.33, and libaio 0.3.109. VirtuOS requires x86\_64 installation.
 
 There is also a [patch](https://lists.xen.org/archives/html/xen-devel/2012-03/msg00678.html) to solve memory leaks with grant tables.
 I adopted it to Linux 3.2.30, so that it can work with VirtuOS, see
@@ -12,11 +12,15 @@ linux\_memleak.patch
 
 Copyright and license info can be obtained directly from new and updated files.
 
+## VirtuOS R1.01
+
+VirtuOS R1.01 contains some fixes and improvements.
+
 ## Publication
 
 [Paper](https://dl.acm.org/ft_gateway.cfm?id=2522719)
 
-VirtuOS: An Operating System with Kernel Virtualization. Ruslan Nikolaev and Godmar Back. In Proceedings of the 24th ACM Symposium on Operating Systems Principles (SOSP'13), pp.116-132. Farmington, PA, USA.
+**VirtuOS: An Operating System with Kernel Virtualization.** Ruslan Nikolaev and Godmar Back. In Proceedings of the 24th ACM Symposium on Operating Systems Principles (SOSP'13), pp.116-132. Farmington, PA, USA.
 
 ## Installation
 
