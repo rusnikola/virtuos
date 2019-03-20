@@ -4,7 +4,7 @@ Copyright (C) 2012-2013 Ruslan Nikolaev
 
 **_Note: It was last released in 2013; I mirrored it here on GitHub._**
 
-VirtuOS R1.0x requires Linux 3.2.30, Xen 4.2.0, uClibc 0.9.33, and libaio 0.3.109. VirtuOS requires x86\_64 installation.
+VirtuOS R1.0x requires [Linux 3.2.30](https://www.kernel.org/pub/linux/kernel/v3.x/linux-3.2.30.tar.xz), [Xen 4.2.0](https://downloads.xenproject.org/release/xen/4.2.0/xen-4.2.0.tar.gz), [uClibc 0.9.33](https://uclibc.org/downloads/uClibc-0.9.33.tar.xz), and [libaio 0.3.109](https://www.mirrorservice.org/pub/slackware/slackware/source/l/libaio/libaio-0.3.109.tar.bz2). VirtuOS requires x86\_64 installation.
 
 There is also a [patch](https://lists.xen.org/archives/html/xen-devel/2012-03/msg00678.html) to solve memory leaks with grant tables.
 I adopted it to Linux 3.2.30, so that it can work with VirtuOS, see
